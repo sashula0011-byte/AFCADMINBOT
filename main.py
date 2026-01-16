@@ -359,8 +359,10 @@ async def cmd_tag(message: types.Message):
     kb = InlineKeyboardMarkup(row_width=1)
     for ch in chats[:50]:
         tags = []
-        if ch.get("age"): tags.append(ch["age"])
-        if ch.get("level"): tags.append(ch["level"])
+        if ch.get("age"):
+            tags.append(ch["age"])
+        if ch.get("level"):
+            tags.append(ch["level"])
         suffix = f" ({', '.join(tags)})" if tags else ""
         kb.add(InlineKeyboardButton(f"{ch['title']}{suffix}", callback_data=f"tag_chat_{ch['chat_id']}"))
     kb.add(InlineKeyboardButton("❌ Отмена", callback_data="tag_cancel"))
@@ -387,7 +389,7 @@ async def cmd_broadcast(message: types.Message):
 
 
 # ==========================
-# Menu callbacks (FIXED)
+# Menu callbacks
 # ==========================
 
 @dp.callback_query_handler(lambda c: c.data == "noop")
@@ -570,8 +572,23 @@ async def bc_level_next(call: types.CallbackQuery):
     BC_TARGET_CHATS[uid] = set(targets)
     STATE[uid] = "bc_wait_msg"
 
+    chat_lines = []
+    for cid in targets:
+        ch = db_get_chat(int(cid))
+        title = ch["title"] if ch and ch.get("title") else str(cid)
+        chat_lines.append(f"• {title}")
+
+    MAX_SHOW = 30
+    shown = chat_lines[:MAX_SHOW]
+    extra = len(chat_lines) - len(shown)
+
+    list_text = "\n".join(shown)
+    if extra > 0:
+        list_text += f"\n… и ещё {extra} чатов"
+
     await call.message.edit_text(
         f"✅ Под фильтр подходит чатов: {len(targets)}\n\n"
+        f"📋 Выбраны чаты:\n{list_text}\n\n"
         "Теперь пришли ОДНО сообщение для рассылки:\n"
         "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
     )
@@ -682,7 +699,6 @@ async def any_message(message: types.Message):
         return
 
     uid = message.from_user.id
-
     if STATE.get(uid) != "bc_wait_msg":
         return
 

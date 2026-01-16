@@ -9,7 +9,7 @@ from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
-load_dotenv()  # без override, чтобы Railway env не перетирались
+load_dotenv()  # без override=True, чтобы Railway env не перетирались
 
 logging.basicConfig(level=logging.INFO)
 
@@ -47,6 +47,9 @@ LEVEL_TAGS = [
     ("pro", "🔴 Профи"),
 ]
 
+ALL_AGE_TAGS = {t for t, _ in AGE_TAGS}
+ALL_LEVEL_TAGS = {t for t, _ in LEVEL_TAGS}
+
 # ==========================
 # Persistent chat storage
 # ==========================
@@ -75,7 +78,7 @@ def upsert_chat(chat: types.Chat):
         "id": chat.id,
         "title": chat.title or str(chat.id),
         "type": chat.type,
-        "age": old.get("age"),      # сохраняем уже назначенные теги
+        "age": old.get("age"),
         "level": old.get("level"),
     }
     save_chats(CHATS)
@@ -94,23 +97,19 @@ def is_owner(message: types.Message) -> bool:
     return message.from_user and is_owner_user_id(message.from_user.id)
 
 async def send_to_chat(chat_id: int, origin: types.Message):
-    # text
     if origin.text:
         await bot.send_message(chat_id, origin.text)
 
-    # photo
     elif origin.photo:
         file_id = origin.photo[-1].file_id
         caption = origin.caption or ""
         await bot.send_photo(chat_id, file_id, caption=caption)
 
-    # video
     elif origin.video:
         file_id = origin.video.file_id
         caption = origin.caption or ""
         await bot.send_video(chat_id, file_id, caption=caption)
 
-    # document
     elif origin.document:
         file_id = origin.document.file_id
         caption = origin.caption or ""
@@ -120,21 +119,21 @@ async def send_to_chat(chat_id: int, origin: types.Message):
         await bot.send_message(chat_id, "⚠️ Этот тип сообщения пока не поддерживается.")
 
 # ==========================
-# Broadcast states (simple)
+# STATES
 # ==========================
 
-STATE: Dict[int, str] = {}  # "bc_filter" | "bc_manual" | "bc_wait_msg"
-SELECTED_CHATS: Dict[int, Set[int]] = {}  # manual selected chats
+# Broadcast steps:
+# bc_age -> bc_level -> bc_wait_msg
+STATE: Dict[int, str] = {}
 
-BC_SELECTED_AGES: Dict[int, Set[str]] = {}   # age tags
-BC_SELECTED_LEVELS: Dict[int, Set[str]] = {} # level tags
+BC_SELECTED_AGES: Dict[int, Set[str]] = {}
+BC_SELECTED_LEVELS: Dict[int, Set[str]] = {}
+BC_TARGET_CHATS: Dict[int, Set[int]] = {}
 
-# ==========================
-# Tag states (simple)
-# ==========================
-
-TAG_STATE: Dict[int, str] = {}  # "tag_choose_chat" | "tag_choose_age" | "tag_choose_level"
-TAG_TARGET_CHAT: Dict[int, int] = {}  # user_id -> chat_id
+# Tag steps:
+# tag_choose_chat -> tag_choose_age -> tag_choose_level
+TAG_STATE: Dict[int, str] = {}
+TAG_TARGET_CHAT: Dict[int, int] = {}
 
 # ==========================
 # Keyboards
@@ -158,8 +157,7 @@ def kb_chat_list_for_tag(user_id: int) -> InlineKeyboardMarkup:
         kb.add(InlineKeyboardButton("❌ Отмена", callback_data="tag_cancel"))
         return kb
 
-    # максимум 40, чтобы не было слишком много кнопок
-    chats = chats[:40]
+    chats = chats[:50]
     for ch in chats:
         cid = ch["id"]
         title = ch.get("title", str(cid))
@@ -174,86 +172,63 @@ def kb_chat_list_for_tag(user_id: int) -> InlineKeyboardMarkup:
     kb.add(InlineKeyboardButton("❌ Отмена", callback_data="tag_cancel"))
     return kb
 
-def kb_age_picker(user_id: int) -> InlineKeyboardMarkup:
-    selected = TAG_TARGET_CHAT.get(user_id)
+def kb_tag_age_picker() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
-
-    # возрастные кнопки + "выбрать все" в конце
     for tag, label in AGE_TAGS:
         kb.add(InlineKeyboardButton(label, callback_data=f"tag_age_{tag}"))
-
-    kb.add(InlineKeyboardButton("✅ Выбрать все (возраст)", callback_data="tag_age_all"))
     kb.add(InlineKeyboardButton("❌ Отмена", callback_data="tag_cancel"))
     return kb
 
-def kb_level_picker(user_id: int) -> InlineKeyboardMarkup:
+def kb_tag_level_picker() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
-
     for tag, label in LEVEL_TAGS:
         kb.add(InlineKeyboardButton(label, callback_data=f"tag_level_{tag}"))
-
-    kb.add(InlineKeyboardButton("✅ Выбрать все (уровни)", callback_data="tag_level_all"))
     kb.add(InlineKeyboardButton("❌ Отмена", callback_data="tag_cancel"))
     return kb
 
-def kb_bc_filter(user_id: int) -> InlineKeyboardMarkup:
-    ages = BC_SELECTED_AGES.get(user_id, set())
-    levels = BC_SELECTED_LEVELS.get(user_id, set())
+# --- Broadcast: Step 1 Age ---
+def kb_bc_age(user_id: int) -> InlineKeyboardMarkup:
+    selected = BC_SELECTED_AGES.get(user_id, set())
     kb = InlineKeyboardMarkup(row_width=1)
 
-    kb.add(InlineKeyboardButton("—— Возраст (можно несколько) ——", callback_data="noop"))
-
     for tag, label in AGE_TAGS:
-        mark = "✅" if tag in ages else "⬜"
+        mark = "✅" if tag in selected else "⬜"
         kb.add(InlineKeyboardButton(f"{mark} {label}", callback_data=f"bc_age_{tag}"))
 
-    # ✅ выбрать все — в конце
-    kb.add(InlineKeyboardButton("✅ Выбрать все возраста", callback_data="bc_age_all"))
-
-    kb.add(InlineKeyboardButton("—— Уровень (можно несколько) ——", callback_data="noop"))
-
-    for tag, label in LEVEL_TAGS:
-        mark = "✅" if tag in levels else "⬜"
-        kb.add(InlineKeyboardButton(f"{mark} {label}", callback_data=f"bc_level_{tag}"))
-
-    # ✅ выбрать все — в конце
-    kb.add(InlineKeyboardButton("✅ Выбрать все уровни", callback_data="bc_level_all"))
+    # Выбрать все в конце (визуально)
+    all_mark = "✅" if selected == ALL_AGE_TAGS else "⬜"
+    kb.add(InlineKeyboardButton(f"{all_mark} ✅ Выбрать все возраста", callback_data="bc_age_all"))
 
     kb.add(
-        InlineKeyboardButton("➡️ Далее", callback_data="bc_filter_next"),
-        InlineKeyboardButton("⚙️ Выбрать вручную чаты", callback_data="bc_manual_start"),
+        InlineKeyboardButton("➡️ Далее", callback_data="bc_age_next"),
         InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"),
     )
     return kb
 
-def kb_bc_manual(user_id: int) -> InlineKeyboardMarkup:
-    selected = SELECTED_CHATS.get(user_id, set())
+# --- Broadcast: Step 2 Level ---
+def kb_bc_level(user_id: int) -> InlineKeyboardMarkup:
+    selected = BC_SELECTED_LEVELS.get(user_id, set())
     kb = InlineKeyboardMarkup(row_width=1)
 
-    chats_list = list(CHATS.values())[:40]
-    if not chats_list:
-        kb.add(InlineKeyboardButton("⚠️ Нет чатов (добавь бота в группы)", callback_data="noop"))
-        kb.add(InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"))
-        return kb
+    for tag, label in LEVEL_TAGS:
+        mark = "✅" if tag in selected else "⬜"
+        kb.add(InlineKeyboardButton(f"{mark} {label}", callback_data=f"bc_level_{tag}"))
 
-    for ch in chats_list:
-        cid = ch["id"]
-        title = ch.get("title", str(cid))
-        mark = "✅" if cid in selected else "⬜"
-        kb.add(InlineKeyboardButton(f"{mark} {title}", callback_data=f"bc_t_{cid}"))
+    all_mark = "✅" if selected == ALL_LEVEL_TAGS else "⬜"
+    kb.add(InlineKeyboardButton(f"{all_mark} ✅ Выбрать все уровни", callback_data="bc_level_all"))
 
     kb.add(
-        InlineKeyboardButton("➡️ Далее", callback_data="bc_manual_next"),
+        InlineKeyboardButton("⬅️ Назад", callback_data="bc_level_back"),
+        InlineKeyboardButton("➡️ Далее", callback_data="bc_level_next"),
         InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"),
     )
     return kb
 
 # ==========================
-# Chat filtering
+# Filtering
 # ==========================
 
 def match_chat(chat: dict, ages: Set[str], levels: Set[str]) -> bool:
-    # если не выбраны ages/levels -> не матч
     if not ages or not levels:
         return False
     return (chat.get("age") in ages) and (chat.get("level") in levels)
@@ -286,7 +261,7 @@ async def cmd_start(message: types.Message):
         f"Ваш ID: <code>{message.from_user.id}</code>\n\n"
         "Команды:\n"
         "/broadcast — рассылка\n"
-        "/tag — разметка чатов (возраст+уровень)\n"
+        "/tag — разметка чатов\n"
         "/chats — список чатов\n",
         parse_mode="HTML",
         reply_markup=kb_main_admin()
@@ -316,7 +291,7 @@ async def cmd_tag(message: types.Message):
 
     TAG_STATE[message.from_user.id] = "tag_choose_chat"
     await message.reply(
-        "🏷 Выбери чат, который нужно разметить:",
+        "🏷 Выбери чат для разметки:",
         reply_markup=kb_chat_list_for_tag(message.from_user.id)
     )
 
@@ -331,13 +306,14 @@ async def cmd_broadcast(message: types.Message):
         return
 
     uid = message.from_user.id
-    STATE[uid] = "bc_filter"
+    STATE[uid] = "bc_age"
     BC_SELECTED_AGES[uid] = set()
     BC_SELECTED_LEVELS[uid] = set()
+    BC_TARGET_CHATS.pop(uid, None)
 
     await message.reply(
-        "📣 Выбери фильтры для рассылки (можно комбо):",
-        reply_markup=kb_bc_filter(uid)
+        "📣 Выбери возраст:",
+        reply_markup=kb_bc_age(uid)
     )
 
 # ==========================
@@ -361,6 +337,160 @@ async def menu_chats(call: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == "noop")
 async def noop(call: types.CallbackQuery):
+    await call.answer()
+
+# ==========================
+# CANCEL
+# ==========================
+
+@dp.callback_query_handler(lambda c: c.data == "bc_cancel")
+async def bc_cancel(call: types.CallbackQuery):
+    uid = call.from_user.id
+    STATE.pop(uid, None)
+    BC_SELECTED_AGES.pop(uid, None)
+    BC_SELECTED_LEVELS.pop(uid, None)
+    BC_TARGET_CHATS.pop(uid, None)
+    await call.message.edit_text("❌ Рассылка отменена.")
+    await call.answer()
+
+# ==========================
+# Broadcast Step 1: AGE
+# ==========================
+
+@dp.callback_query_handler(lambda c: c.data.startswith("bc_age_"))
+async def bc_toggle_age(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_age":
+        await call.answer("Неактуально")
+        return
+
+    tag = call.data.split("_")[-1]
+    selected = BC_SELECTED_AGES.setdefault(uid, set())
+
+    if tag in selected:
+        selected.remove(tag)
+    else:
+        selected.add(tag)
+
+    await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_age_all")
+async def bc_age_all(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_age":
+        await call.answer("Неактуально")
+        return
+
+    selected = BC_SELECTED_AGES.setdefault(uid, set())
+    if selected == ALL_AGE_TAGS:
+        selected.clear()
+    else:
+        selected.clear()
+        selected.update(ALL_AGE_TAGS)
+
+    await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
+    await call.answer("Ок")
+
+@dp.callback_query_handler(lambda c: c.data == "bc_age_next")
+async def bc_age_next(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_age":
+        await call.answer("Неактуально")
+        return
+
+    ages = BC_SELECTED_AGES.get(uid, set())
+    if not ages:
+        await call.answer("Выбери минимум 1 возраст", show_alert=True)
+        return
+
+    STATE[uid] = "bc_level"
+    await call.message.edit_text(
+        "📣 Выбери уровень:",
+        reply_markup=kb_bc_level(uid)
+    )
+    await call.answer()
+
+# ==========================
+# Broadcast Step 2: LEVEL
+# ==========================
+
+@dp.callback_query_handler(lambda c: c.data.startswith("bc_level_"))
+async def bc_toggle_level(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_level":
+        await call.answer("Неактуально")
+        return
+
+    tag = call.data.split("_")[-1]
+    selected = BC_SELECTED_LEVELS.setdefault(uid, set())
+
+    if tag in selected:
+        selected.remove(tag)
+    else:
+        selected.add(tag)
+
+    await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_level_all")
+async def bc_level_all(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_level":
+        await call.answer("Неактуально")
+        return
+
+    selected = BC_SELECTED_LEVELS.setdefault(uid, set())
+    if selected == ALL_LEVEL_TAGS:
+        selected.clear()
+    else:
+        selected.clear()
+        selected.update(ALL_LEVEL_TAGS)
+
+    await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
+    await call.answer("Ок")
+
+@dp.callback_query_handler(lambda c: c.data == "bc_level_back")
+async def bc_level_back(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_level":
+        await call.answer("Неактуально")
+        return
+
+    STATE[uid] = "bc_age"
+    await call.message.edit_text(
+        "📣 Выбери возраст:",
+        reply_markup=kb_bc_age(uid)
+    )
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_level_next")
+async def bc_level_next(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_level":
+        await call.answer("Неактуально")
+        return
+
+    ages = BC_SELECTED_AGES.get(uid, set())
+    levels = BC_SELECTED_LEVELS.get(uid, set())
+
+    if not levels:
+        await call.answer("Выбери минимум 1 уровень", show_alert=True)
+        return
+
+    targets = get_chats_by_filter(ages, levels)
+    if not targets:
+        await call.answer("Нет чатов под фильтр. Разметь /tag", show_alert=True)
+        return
+
+    BC_TARGET_CHATS[uid] = set(targets)
+    STATE[uid] = "bc_wait_msg"
+
+    await call.message.edit_text(
+        f"✅ Под фильтр подходит чатов: {len(targets)}\n\n"
+        "Теперь пришли ОДНО сообщение для рассылки:\n"
+        "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
+    )
     await call.answer()
 
 # ==========================
@@ -391,7 +521,7 @@ async def tag_choose_chat(call: types.CallbackQuery):
 
     await call.message.edit_text(
         f"Чат: {title}\n\nВыбери возраст:",
-        reply_markup=kb_age_picker(uid)
+        reply_markup=kb_tag_age_picker()
     )
     await call.answer()
 
@@ -409,10 +539,6 @@ async def tag_set_age(call: types.CallbackQuery):
 
     age_tag = call.data.split("_")[-1]
 
-    if age_tag == "all":
-        await call.answer("Выбери конкретный возраст", show_alert=True)
-        return
-
     ch = get_chat(chat_id)
     if not ch:
         await call.answer("Чат не найден")
@@ -425,14 +551,9 @@ async def tag_set_age(call: types.CallbackQuery):
     TAG_STATE[uid] = "tag_choose_level"
     await call.message.edit_text(
         f"✅ Возраст сохранён: {age_tag}\n\nТеперь выбери уровень:",
-        reply_markup=kb_level_picker(uid)
+        reply_markup=kb_tag_level_picker()
     )
     await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "tag_age_all")
-async def tag_age_all(call: types.CallbackQuery):
-    # На самом деле для одного чата нельзя "все возраста"
-    await call.answer("Для разметки чата нужно выбрать один возраст.", show_alert=True)
 
 @dp.callback_query_handler(lambda c: c.data.startswith("tag_level_"))
 async def tag_set_level(call: types.CallbackQuery):
@@ -447,10 +568,6 @@ async def tag_set_level(call: types.CallbackQuery):
         return
 
     level_tag = call.data.split("_")[-1]
-
-    if level_tag == "all":
-        await call.answer("Выбери конкретный уровень", show_alert=True)
-        return
 
     ch = get_chat(chat_id)
     if not ch:
@@ -471,190 +588,6 @@ async def tag_set_level(call: types.CallbackQuery):
     )
     await call.answer()
 
-@dp.callback_query_handler(lambda c: c.data == "tag_level_all")
-async def tag_level_all(call: types.CallbackQuery):
-    await call.answer("Для разметки чата нужно выбрать один уровень.", show_alert=True)
-
-# ==========================
-# BROADCAST FILTER callbacks
-# ==========================
-
-@dp.callback_query_handler(lambda c: c.data == "bc_cancel")
-async def bc_cancel(call: types.CallbackQuery):
-    uid = call.from_user.id
-    STATE.pop(uid, None)
-    SELECTED_CHATS.pop(uid, None)
-    BC_SELECTED_AGES.pop(uid, None)
-    BC_SELECTED_LEVELS.pop(uid, None)
-    await call.message.edit_text("❌ Рассылка отменена.")
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_age_"))
-async def bc_toggle_age(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_filter":
-        await call.answer("Неактуально")
-        return
-
-    tag = call.data.split("_")[-1]
-    ages = BC_SELECTED_AGES.setdefault(uid, set())
-
-    if tag == "all":
-        return
-
-    if tag in ages:
-        ages.remove(tag)
-    else:
-        ages.add(tag)
-
-    await call.message.edit_reply_markup(reply_markup=kb_bc_filter(uid))
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "bc_age_all")
-async def bc_age_all(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_filter":
-        await call.answer("Неактуально")
-        return
-
-    ages = BC_SELECTED_AGES.setdefault(uid, set())
-    all_tags = {t for t, _ in AGE_TAGS}
-
-    # если уже выбраны все — сбрасываем, иначе ставим все
-    if ages == all_tags:
-        ages.clear()
-    else:
-        ages.clear()
-        ages.update(all_tags)
-
-    await call.message.edit_reply_markup(reply_markup=kb_bc_filter(uid))
-    await call.answer("Ок")
-
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_level_"))
-async def bc_toggle_level(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_filter":
-        await call.answer("Неактуально")
-        return
-
-    tag = call.data.split("_")[-1]
-    levels = BC_SELECTED_LEVELS.setdefault(uid, set())
-
-    if tag == "all":
-        return
-
-    if tag in levels:
-        levels.remove(tag)
-    else:
-        levels.add(tag)
-
-    await call.message.edit_reply_markup(reply_markup=kb_bc_filter(uid))
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "bc_level_all")
-async def bc_level_all(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_filter":
-        await call.answer("Неактуально")
-        return
-
-    levels = BC_SELECTED_LEVELS.setdefault(uid, set())
-    all_tags = {t for t, _ in LEVEL_TAGS}
-
-    if levels == all_tags:
-        levels.clear()
-    else:
-        levels.clear()
-        levels.update(all_tags)
-
-    await call.message.edit_reply_markup(reply_markup=kb_bc_filter(uid))
-    await call.answer("Ок")
-
-@dp.callback_query_handler(lambda c: c.data == "bc_filter_next")
-async def bc_filter_next(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_filter":
-        await call.answer("Неактуально")
-        return
-
-    ages = BC_SELECTED_AGES.get(uid, set())
-    levels = BC_SELECTED_LEVELS.get(uid, set())
-
-    if not ages or not levels:
-        await call.answer("Выбери минимум 1 возраст и 1 уровень", show_alert=True)
-        return
-
-    targets = get_chats_by_filter(ages, levels)
-
-    if not targets:
-        await call.answer("Нет чатов под выбранные фильтры. Разметь /tag", show_alert=True)
-        return
-
-    STATE[uid] = "bc_wait_msg"
-    SELECTED_CHATS[uid] = set(targets)
-
-    await call.message.edit_text(
-        f"✅ Под фильтры подходит чатов: {len(targets)}\n\n"
-        "Теперь пришли ОДНО сообщение для рассылки:\n"
-        "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
-    )
-    await call.answer()
-
-# ==========================
-# BROADCAST MANUAL callbacks
-# ==========================
-
-@dp.callback_query_handler(lambda c: c.data == "bc_manual_start")
-async def bc_manual_start(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_filter":
-        await call.answer("Неактуально")
-        return
-
-    STATE[uid] = "bc_manual"
-    SELECTED_CHATS[uid] = set()
-
-    await call.message.edit_text("⚙️ Выбери чаты вручную:", reply_markup=kb_bc_manual(uid))
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_t_"))
-async def bc_manual_toggle(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_manual":
-        await call.answer("Неактуально")
-        return
-
-    chat_id = int(call.data.split("_")[-1])
-    selected = SELECTED_CHATS.setdefault(uid, set())
-
-    if chat_id in selected:
-        selected.remove(chat_id)
-    else:
-        selected.add(chat_id)
-
-    await call.message.edit_reply_markup(reply_markup=kb_bc_manual(uid))
-    await call.answer("Ок")
-
-@dp.callback_query_handler(lambda c: c.data == "bc_manual_next")
-async def bc_manual_next(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_manual":
-        await call.answer("Неактуально")
-        return
-
-    selected = list(SELECTED_CHATS.get(uid, set()))
-    if not selected:
-        await call.answer("Выбери хотя бы один чат", show_alert=True)
-        return
-
-    STATE[uid] = "bc_wait_msg"
-    await call.message.edit_text(
-        f"✅ Выбрано чатов: {len(selected)}\n\n"
-        "Теперь пришли ОДНО сообщение для рассылки:\n"
-        "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
-    )
-    await call.answer()
-
 # ==========================
 # Any message: store chats + broadcast send
 # ==========================
@@ -665,23 +598,21 @@ async def any_message(message: types.Message):
     if message.chat.type in ("group", "supergroup"):
         upsert_chat(message.chat)
 
-    # если не owner — игнор
+    # only owner can broadcast
     if not message.from_user or not is_owner_user_id(message.from_user.id):
         return
 
     uid = message.from_user.id
 
-    # ждём сообщение для рассылки
     if STATE.get(uid) != "bc_wait_msg":
         return
 
-    chat_ids = list(SELECTED_CHATS.get(uid, set()))
-
-    # очищаем состояние
+    chat_ids = list(BC_TARGET_CHATS.get(uid, set()))
+    # clear state
     STATE.pop(uid, None)
-    SELECTED_CHATS.pop(uid, None)
     BC_SELECTED_AGES.pop(uid, None)
     BC_SELECTED_LEVELS.pop(uid, None)
+    BC_TARGET_CHATS.pop(uid, None)
 
     await message.reply(f"🚀 Начинаю рассылку в {len(chat_ids)} чатов...")
 
@@ -695,9 +626,7 @@ async def any_message(message: types.Message):
         except Exception as e:
             fail += 1
             logging.error(f"Failed to send to {cid}: {e}")
-
-        # антифлуд
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.0)  # антифлуд
 
     await message.reply(f"✅ Готово!\nУспешно: {ok}\nОшибок: {fail}")
 

@@ -6,7 +6,7 @@ from aiogram.utils import executor
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# Debug prints to check environment variables
+# Debug prints
 print("BOT_TOKEN exists:", BOT_TOKEN is not None, "length:", len(BOT_TOKEN) if BOT_TOKEN else 0)
 print("OWNER_ID:", OWNER_ID)
 
@@ -21,9 +21,12 @@ async def start_handler(message: types.Message):
 async def broadcast_handler(message: types.Message):
     if message.from_user.id != OWNER_ID:
         return
-    text = message.get_args()
     await message.reply("Рассылка пока не настроена в коде")
+
+async def on_startup(dp):
+    # Ensure webhook is deleted to enable polling
+    await bot.delete_webhook(drop_pending_updates=True)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    executor.start_polling(dp)
+    executor.start_polling(dp, on_startup=on_startup)

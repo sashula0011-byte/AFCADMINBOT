@@ -149,9 +149,11 @@ def kb_main_admin() -> InlineKeyboardMarkup:
     kb.add(
         InlineKeyboardButton("📣 Рассылка", callback_data="menu_broadcast"),
         InlineKeyboardButton("🏷 Разметить чат (/tag)", callback_data="menu_tag"),
-        InlineKeyboardButton("🧩 Список чатов", callback_data="menu_chats"),
+        InlineKeyboardButton("🧩 Список чатов (с тегами)", callback_data="menu_chats"),
+        InlineKeyboardButton("📋 Все группы", callback_data="menu_groups"),
     )
     return kb
+
 
 def kb_chat_list_for_tag(user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)

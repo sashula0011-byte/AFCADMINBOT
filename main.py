@@ -151,9 +151,9 @@ def kb_main_admin() -> InlineKeyboardMarkup:
         InlineKeyboardButton("🏷 Разметить чат (/tag)", callback_data="menu_tag"),
         InlineKeyboardButton("🧩 Список чатов (с тегами)", callback_data="menu_chats"),
         InlineKeyboardButton("📋 Все группы", callback_data="menu_groups"),
+        InlineKeyboardButton("⚠️ Не помеченные группы", callback_data="menu_groups_missing"),
     )
     return kb
-
 
 def kb_chat_list_for_tag(user_id: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
@@ -272,7 +272,9 @@ async def cmd_start(message: types.Message):
         "Команды:\n"
         "/broadcast — рассылка\n"
         "/tag — разметка чатов\n"
-        "/chats — список чатов\n",
+        "/chats — список чатов (с тегами)\n"
+        "/groups — все группы\n"
+        "/groups_missing — не помеченные группы\n",
         parse_mode="HTML",
         reply_markup=kb_main_admin()
     )
@@ -286,8 +288,47 @@ async def cmd_chats(message: types.Message):
         await message.reply("Чатов пока нет. Добавь бота в группы.")
         return
 
-    lines = ["📌 Чаты:"]
+    lines = ["🧩 Чаты (с тегами):"]
     for ch in CHATS.values():
+        age = ch.get("age") or "-"
+        level = ch.get("level") or "-"
+        lines.append(f"- {ch['title']} | age={age} | level={level}")
+    await message.reply("\n".join(lines))
+
+@dp.message_handler(commands=["groups"])
+async def cmd_groups(message: types.Message):
+    if not is_owner(message):
+        await message.reply("⛔ Только владелец может смотреть список групп.")
+        return
+    if not CHATS:
+        await message.reply("Групп пока нет. Добавь бота в группы.")
+        return
+
+    lines = ["📋 Все группы:"]
+    for ch in CHATS.values():
+        lines.append(f"- {ch['title']} ({ch['id']})")
+    await message.reply("\n".join(lines))
+
+@dp.message_handler(commands=["groups_missing"])
+async def cmd_groups_missing(message: types.Message):
+    if not is_owner(message):
+        await message.reply("⛔ Только владелец может смотреть список групп.")
+        return
+    if not CHATS:
+        await message.reply("Групп пока нет. Добавь бота в группы.")
+        return
+
+    missing = []
+    for ch in CHATS.values():
+        if not ch.get("age") or not ch.get("level"):
+            missing.append(ch)
+
+    if not missing:
+        await message.reply("✅ Все группы размечены (age+level заполнены).")
+        return
+
+    lines = ["⚠️ Не помеченные группы:"]
+    for ch in missing:
         age = ch.get("age") or "-"
         level = ch.get("level") or "-"
         lines.append(f"- {ch['title']} | age={age} | level={level}")
@@ -346,6 +387,16 @@ async def menu_chats(call: types.CallbackQuery):
     fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
     await cmd_chats(fake)
 
+@dp.callback_query_handler(lambda c: c.data == "menu_groups")
+async def menu_groups(call: types.CallbackQuery):
+    fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
+    await cmd_groups(fake)
+
+@dp.callback_query_handler(lambda c: c.data == "menu_groups_missing")
+async def menu_groups_missing(call: types.CallbackQuery):
+    fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
+    await cmd_groups_missing(fake)
+
 @dp.callback_query_handler(lambda c: c.data == "noop")
 async def noop(call: types.CallbackQuery):
     await call.answer()
@@ -370,7 +421,6 @@ async def bc_cancel(call: types.CallbackQuery):
 # Broadcast Step 1: AGE
 # ==========================
 
-# ВАЖНО: исключаем bc_age_all / bc_age_next
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_age_") and c.data not in ("bc_age_all", "bc_age_next"))
 async def bc_toggle_age(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -430,7 +480,6 @@ async def bc_age_next(call: types.CallbackQuery):
 # Broadcast Step 2: LEVEL
 # ==========================
 
-# ВАЖНО: исключаем bc_level_all / bc_level_back / bc_level_next
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_level_") and c.data not in ("bc_level_all", "bc_level_back", "bc_level_next"))
 async def bc_toggle_level(call: types.CallbackQuery):
     uid = call.from_user.id

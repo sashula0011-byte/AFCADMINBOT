@@ -2,3 +2,4 @@ aiogram==2.25.1
 openai
 apscheduler
 python-dotenv
+psycopg2-binary==2.9.9

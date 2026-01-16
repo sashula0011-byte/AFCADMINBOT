@@ -9,7 +9,7 @@ from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
-load_dotenv()  # без override=True, чтобы Railway env не перетирались
+load_dotenv()  # НЕ override=True, чтобы Railway env не перетирались
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,6 +28,7 @@ DATA_FILE = "chats.json"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
+
 
 # ==========================
 # Dictionaries / Tags
@@ -49,6 +50,7 @@ LEVEL_TAGS = [
 
 ALL_AGE_TAGS = {t for t, _ in AGE_TAGS}
 ALL_LEVEL_TAGS = {t for t, _ in LEVEL_TAGS}
+
 
 # ==========================
 # Persistent chat storage
@@ -86,6 +88,7 @@ def upsert_chat(chat: types.Chat):
 def get_chat(chat_id: int) -> Optional[dict]:
     return CHATS.get(str(chat_id))
 
+
 # ==========================
 # Helpers
 # ==========================
@@ -118,6 +121,7 @@ async def send_to_chat(chat_id: int, origin: types.Message):
     else:
         await bot.send_message(chat_id, "⚠️ Этот тип сообщения пока не поддерживается.")
 
+
 # ==========================
 # STATES
 # ==========================
@@ -134,6 +138,7 @@ BC_TARGET_CHATS: Dict[int, Set[int]] = {}
 # tag_choose_chat -> tag_choose_age -> tag_choose_level
 TAG_STATE: Dict[int, str] = {}
 TAG_TARGET_CHAT: Dict[int, int] = {}
+
 
 # ==========================
 # Keyboards
@@ -195,7 +200,7 @@ def kb_bc_age(user_id: int) -> InlineKeyboardMarkup:
         mark = "✅" if tag in selected else "⬜"
         kb.add(InlineKeyboardButton(f"{mark} {label}", callback_data=f"bc_age_{tag}"))
 
-    # Выбрать все в конце (визуально)
+    # "Выбрать все" (в конце) с визуальной галочкой
     all_mark = "✅" if selected == ALL_AGE_TAGS else "⬜"
     kb.add(InlineKeyboardButton(f"{all_mark} ✅ Выбрать все возраста", callback_data="bc_age_all"))
 
@@ -224,6 +229,7 @@ def kb_bc_level(user_id: int) -> InlineKeyboardMarkup:
     )
     return kb
 
+
 # ==========================
 # Filtering
 # ==========================
@@ -240,6 +246,7 @@ def get_chats_by_filter(ages: Set[str], levels: Set[str]) -> List[int]:
             result.append(ch["id"])
     return result
 
+
 # ==========================
 # Startup
 # ==========================
@@ -249,6 +256,7 @@ async def on_startup(dp: Dispatcher):
     logging.info("✅ Bot started polling")
     logging.info(f"OWNER_ID parsed = {OWNER_ID}")
     logging.info(f"Loaded chats: {len(CHATS)}")
+
 
 # ==========================
 # Commands
@@ -316,6 +324,7 @@ async def cmd_broadcast(message: types.Message):
         reply_markup=kb_bc_age(uid)
     )
 
+
 # ==========================
 # Menu callbacks
 # ==========================
@@ -339,8 +348,9 @@ async def menu_chats(call: types.CallbackQuery):
 async def noop(call: types.CallbackQuery):
     await call.answer()
 
+
 # ==========================
-# CANCEL
+# CANCEL broadcast
 # ==========================
 
 @dp.callback_query_handler(lambda c: c.data == "bc_cancel")
@@ -353,11 +363,13 @@ async def bc_cancel(call: types.CallbackQuery):
     await call.message.edit_text("❌ Рассылка отменена.")
     await call.answer()
 
+
 # ==========================
 # Broadcast Step 1: AGE
 # ==========================
 
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_age_"))
+# ВАЖНО: исключаем bc_age_all / bc_age_next
+@dp.callback_query_handler(lambda c: c.data.startswith("bc_age_") and c.data not in ("bc_age_all", "bc_age_next"))
 async def bc_toggle_age(call: types.CallbackQuery):
     uid = call.from_user.id
     if STATE.get(uid) != "bc_age":
@@ -411,11 +423,13 @@ async def bc_age_next(call: types.CallbackQuery):
     )
     await call.answer()
 
+
 # ==========================
 # Broadcast Step 2: LEVEL
 # ==========================
 
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_level_"))
+# ВАЖНО: исключаем bc_level_all / bc_level_back / bc_level_next
+@dp.callback_query_handler(lambda c: c.data.startswith("bc_level_") and c.data not in ("bc_level_all", "bc_level_back", "bc_level_next"))
 async def bc_toggle_level(call: types.CallbackQuery):
     uid = call.from_user.id
     if STATE.get(uid) != "bc_level":
@@ -492,6 +506,7 @@ async def bc_level_next(call: types.CallbackQuery):
         "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
     )
     await call.answer()
+
 
 # ==========================
 # TAG callbacks
@@ -588,6 +603,7 @@ async def tag_set_level(call: types.CallbackQuery):
     )
     await call.answer()
 
+
 # ==========================
 # Any message: store chats + broadcast send
 # ==========================
@@ -608,6 +624,7 @@ async def any_message(message: types.Message):
         return
 
     chat_ids = list(BC_TARGET_CHATS.get(uid, set()))
+
     # clear state
     STATE.pop(uid, None)
     BC_SELECTED_AGES.pop(uid, None)
@@ -629,6 +646,7 @@ async def any_message(message: types.Message):
         await asyncio.sleep(1.0)  # антифлуд
 
     await message.reply(f"✅ Готово!\nУспешно: {ok}\nОшибок: {fail}")
+
 
 # ==========================
 # Run

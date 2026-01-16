@@ -6,6 +6,10 @@ from aiogram.utils import executor
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# Debug prints to check environment variables
+print("BOT_TOKEN exists:", BOT_TOKEN is not None, "length:", len(BOT_TOKEN) if BOT_TOKEN else 0)
+print("OWNER_ID:", OWNER_ID)
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 

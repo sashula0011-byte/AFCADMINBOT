@@ -96,17 +96,17 @@ def db_upsert_chat(chat: types.Chat):
             """, (chat.id, chat.title or str(chat.id), chat.type))
         conn.commit()
 
-def db_get_chats() -> List[dict]:
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM chats ORDER BY title ASC;")
-            return cur.fetchall()
-
 def db_get_chat(chat_id: int) -> Optional[dict]:
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM chats WHERE chat_id=%s;", (chat_id,))
             return cur.fetchone()
+
+def db_get_chats() -> List[dict]:
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM chats ORDER BY title ASC;")
+            return cur.fetchall()
 
 def db_get_chats_by_branch(branch: str) -> List[dict]:
     with db_conn() as conn:
@@ -198,6 +198,7 @@ def chunk_list(items: List[dict], size: int) -> List[List[dict]]:
 # ==========================
 
 STATE: Dict[int, str] = {}
+
 BC_SELECTED_BRANCH: Dict[int, str] = {}
 BC_SELECTED_AGES: Dict[int, Set[str]] = {}
 BC_SELECTED_LEVELS: Dict[int, Set[str]] = {}
@@ -206,22 +207,20 @@ BC_TARGET_CHATS: Dict[int, Set[int]] = {}
 BC_MANUAL_SELECTED: Dict[int, Set[int]] = {}
 BC_MANUAL_PAGE: Dict[int, int] = {}
 
-# Branch tagging flow
 BR_STATE: Dict[int, str] = {}
 BR_TARGET_CHAT: Dict[int, int] = {}
 BR_AUTO_NEXT: Dict[int, bool] = {}
 
 
 # ==========================
-# Keyboards
+# Keyboards (INLINE ONLY)
 # ==========================
 
 def kb_main_admin() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("📣 Рассылка", callback_data="menu_broadcast"),
-        InlineKeyboardButton("🏢 Разметка филиала", callback_data="menu_branch_tag"),
-        InlineKeyboardButton("⚡ Следующий без филиала", callback_data="menu_branch_next_missing"),
+        InlineKeyboardButton("🏢 Разметка филиала (следующий)", callback_data="menu_branch_next_missing"),
     )
     return kb
 
@@ -311,10 +310,9 @@ def kb_bc_manual_pick(user_id: int) -> InlineKeyboardMarkup:
     nav.append(InlineKeyboardButton(f"📄 {page+1}/{len(pages)}", callback_data="noop"))
     if page < len(pages) - 1:
         nav.append(InlineKeyboardButton("➡️", callback_data="bc_mpage_next"))
-    if nav:
-        kb.row(*nav)
+    kb.row(*nav)
 
-    all_mark = "✅" if len(selected) == len(chats) and len(chats) > 0 else "⬜"
+    all_mark = "✅" if len(chats) > 0 and len(selected) == len(chats) else "⬜"
     kb.add(
         InlineKeyboardButton(f"{all_mark} ✅ Выбрать все", callback_data="bc_mpick_all"),
         InlineKeyboardButton("➡️ Далее", callback_data="bc_mpick_next"),
@@ -343,7 +341,7 @@ async def on_startup(dp: Dispatcher):
 async def cmd_start(message: types.Message):
     await message.reply(
         "✅ Бот работает.\n"
-        f"Ваш ID: <code>{message.from_user.id}</code>\n",
+        f"Ваш ID: <code>{message.from_user.id}</code>",
         parse_mode="HTML",
         reply_markup=kb_main_admin()
     )
@@ -364,11 +362,14 @@ async def cmd_broadcast(message: types.Message):
     BC_MANUAL_SELECTED.pop(uid, None)
     BC_MANUAL_PAGE.pop(uid, None)
 
-    await message.reply("📣 Выбери филиал для рассылки:", reply_markup=kb_branch_picker("bc_branch", "bc_cancel"))
+    await message.reply(
+        "📣 Выбери филиал для рассылки:",
+        reply_markup=kb_branch_picker("bc_branch", "bc_cancel")
+    )
 
 
 # ==========================
-# Menu callbacks
+# Inline menu callbacks
 # ==========================
 
 @dp.callback_query_handler(lambda c: c.data == "noop")
@@ -377,6 +378,9 @@ async def noop(call: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == "menu_broadcast")
 async def menu_broadcast(call: types.CallbackQuery):
+    if not is_owner_user_id(call.from_user.id):
+        await call.answer("⛔", show_alert=True)
+        return
     fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
     await cmd_broadcast(fake)
     await call.answer()
@@ -406,7 +410,7 @@ async def menu_branch_next_missing(call: types.CallbackQuery):
 
 
 # ==========================
-# Branch tagging (FIXED)
+# Branch tagging
 # ==========================
 
 @dp.callback_query_handler(lambda c: c.data == "br_cancel")
@@ -436,12 +440,14 @@ async def br_set_branch(call: types.CallbackQuery):
     ch = db_get_chat(chat_id)
     title = ch["title"] if ch else str(chat_id)
 
+    # clear state
     BR_STATE.pop(uid, None)
     BR_TARGET_CHAT.pop(uid, None)
 
     await call.message.edit_text(f"✅ Филиал назначен!\n\n{title}\nbranch={branch}")
     await call.answer()
 
+    # auto-next
     if BR_AUTO_NEXT.get(uid):
         next_chat = db_get_next_missing_branch_chat()
         if not next_chat:
@@ -459,8 +465,21 @@ async def br_set_branch(call: types.CallbackQuery):
 
 
 # ==========================
-# Broadcast choose branch
+# Broadcast flow
 # ==========================
+
+@dp.callback_query_handler(lambda c: c.data == "bc_cancel")
+async def bc_cancel(call: types.CallbackQuery):
+    uid = call.from_user.id
+    STATE.pop(uid, None)
+    BC_SELECTED_BRANCH.pop(uid, None)
+    BC_SELECTED_AGES.pop(uid, None)
+    BC_SELECTED_LEVELS.pop(uid, None)
+    BC_TARGET_CHATS.pop(uid, None)
+    BC_MANUAL_SELECTED.pop(uid, None)
+    BC_MANUAL_PAGE.pop(uid, None)
+    await call.message.edit_text("❌ Рассылка отменена.")
+    await call.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_branch_"))
 async def bc_choose_branch(call: types.CallbackQuery):
@@ -474,15 +493,10 @@ async def bc_choose_branch(call: types.CallbackQuery):
     STATE[uid] = "bc_choose_mode"
 
     await call.message.edit_text(
-        f"✅ Филиал выбран: {branch}\n\nТеперь выбери как выбирать чаты:",
+        "Теперь выбери как выбирать чаты:",
         reply_markup=kb_broadcast_mode()
     )
     await call.answer()
-
-
-# ==========================
-# Broadcast choose mode
-# ==========================
 
 @dp.callback_query_handler(lambda c: c.data == "bc_mode_manual")
 async def bc_mode_manual(call: types.CallbackQuery):
@@ -523,43 +537,7 @@ async def bc_mode_tags(call: types.CallbackQuery):
     await call.message.edit_text("🏷 Выбери возраст:", reply_markup=kb_bc_age(uid))
     await call.answer()
 
-
-# ==========================
-# Broadcast cancel + confirm + send
-# ==========================
-
-@dp.callback_query_handler(lambda c: c.data == "bc_cancel")
-async def bc_cancel(call: types.CallbackQuery):
-    uid = call.from_user.id
-    STATE.pop(uid, None)
-    BC_SELECTED_BRANCH.pop(uid, None)
-    BC_SELECTED_AGES.pop(uid, None)
-    BC_SELECTED_LEVELS.pop(uid, None)
-    BC_TARGET_CHATS.pop(uid, None)
-    BC_MANUAL_SELECTED.pop(uid, None)
-    BC_MANUAL_PAGE.pop(uid, None)
-    await call.message.edit_text("❌ Рассылка отменена.")
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "bc_confirm_send")
-async def bc_confirm_send(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_confirm":
-        await call.answer("Неактуально")
-        return
-
-    STATE[uid] = "bc_wait_msg"
-    await call.message.edit_text(
-        "✅ Подтверждено!\n\n"
-        "Теперь пришли ОДНО сообщение для рассылки:\n"
-        "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
-    )
-    await call.answer()
-
-
-# ==========================
-# Manual pick handlers
-# ==========================
+# ---- manual pick
 
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_mpick_"))
 async def bc_mpick_toggle(call: types.CallbackQuery):
@@ -648,10 +626,7 @@ async def bc_mpick_next(call: types.CallbackQuery):
     )
     await call.answer()
 
-
-# ==========================
-# TAG flow broadcast (age/level)
-# ==========================
+# ---- tag flow
 
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_age_") and c.data not in ("bc_age_all", "bc_age_next"))
 async def bc_toggle_age(call: types.CallbackQuery):
@@ -794,16 +769,33 @@ async def bc_level_next(call: types.CallbackQuery):
     )
     await call.answer()
 
+@dp.callback_query_handler(lambda c: c.data == "bc_confirm_send")
+async def bc_confirm_send(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_confirm":
+        await call.answer("Неактуально")
+        return
+
+    STATE[uid] = "bc_wait_msg"
+    await call.message.edit_text(
+        "✅ Подтверждено!\n\n"
+        "Теперь пришли ОДНО сообщение для рассылки:\n"
+        "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
+    )
+    await call.answer()
+
 
 # ==========================
-# Any message: save chat + send broadcast
+# Any message: save chat + send broadcast message
 # ==========================
 
 @dp.message_handler(content_types=types.ContentTypes.ANY)
 async def any_message(message: types.Message):
+    # save chat if group message
     if message.chat.type in ("group", "supergroup"):
         db_upsert_chat(message.chat)
 
+    # broadcast send
     if not message.from_user or not is_owner_user_id(message.from_user.id):
         return
 
@@ -813,7 +805,7 @@ async def any_message(message: types.Message):
 
     chat_ids = list(BC_TARGET_CHATS.get(uid, set()))
 
-    # clear broadcast state
+    # clear state
     STATE.pop(uid, None)
     BC_SELECTED_BRANCH.pop(uid, None)
     BC_SELECTED_AGES.pop(uid, None)

@@ -70,11 +70,10 @@ def db_conn():
 def db_init():
     """
     Создание таблицы + авто-миграция.
-    Нужна чтобы при обновлениях кода бот не ломался если таблица уже была создана без новых колонок.
     """
     with db_conn() as conn:
         with conn.cursor() as cur:
-            # 1) базовая таблица
+            # базовая таблица
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chats (
                     chat_id BIGINT PRIMARY KEY,
@@ -84,7 +83,7 @@ def db_init():
                 );
             """)
 
-            # 2) миграции колонок
+            # миграции колонок
             cur.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS branch TEXT;")
             cur.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS age TEXT;")
             cur.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS level TEXT;")
@@ -579,10 +578,10 @@ async def bc_mode_tags(call: types.CallbackQuery):
 
 
 # ==========================
-# Manual pick
+# Manual pick (FIXED)
 # ==========================
 
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_mpick_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("bc_mpick_") and c.data.split("_")[-1].isdigit())
 async def bc_mpick_toggle(call: types.CallbackQuery):
     uid = call.from_user.id
     if STATE.get(uid) != "bc_manual_pick":
@@ -591,6 +590,7 @@ async def bc_mpick_toggle(call: types.CallbackQuery):
 
     chat_id = int(call.data.split("_")[-1])
     selected = BC_MANUAL_SELECTED.setdefault(uid, set())
+
     if chat_id in selected:
         selected.remove(chat_id)
     else:
@@ -667,141 +667,6 @@ async def bc_mpick_next(call: types.CallbackQuery):
 
     await call.message.edit_text(
         f"✅ Выбрано чатов: {len(selected)}\n\n"
-        f"📋 Чаты:\n{list_text}\n\n"
-        "Нажми ✅ чтобы подтвердить рассылку.",
-        reply_markup=kb_bc_confirm()
-    )
-    await call.answer()
-
-
-# ==========================
-# Age / level filter
-# ==========================
-
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_age_") and c.data not in ("bc_age_all", "bc_age_next"))
-async def bc_toggle_age(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_age":
-        await call.answer("Неактуально")
-        return
-    tag = call.data.split("_")[-1]
-    selected = BC_SELECTED_AGES.setdefault(uid, set())
-    selected.remove(tag) if tag in selected else selected.add(tag)
-    await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
-    await call.answer()
-
-
-@dp.callback_query_handler(lambda c: c.data == "bc_age_all")
-async def bc_age_all(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_age":
-        await call.answer("Неактуально")
-        return
-    selected = BC_SELECTED_AGES.setdefault(uid, set())
-    if selected == ALL_AGE_TAGS:
-        selected.clear()
-    else:
-        selected.clear()
-        selected.update(ALL_AGE_TAGS)
-    await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
-    await call.answer("Ок")
-
-
-@dp.callback_query_handler(lambda c: c.data == "bc_age_next")
-async def bc_age_next(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_age":
-        await call.answer("Неактуально")
-        return
-    ages = BC_SELECTED_AGES.get(uid, set())
-    if not ages:
-        await call.answer("Выбери минимум 1 возраст", show_alert=True)
-        return
-    STATE[uid] = "bc_level"
-    await call.message.edit_text("🏷 Выбери уровень:", reply_markup=kb_bc_level(uid))
-    await call.answer()
-
-
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_level_") and c.data not in ("bc_level_all", "bc_level_back", "bc_level_next"))
-async def bc_toggle_level(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_level":
-        await call.answer("Неактуально")
-        return
-    tag = call.data.split("_")[-1]
-    selected = BC_SELECTED_LEVELS.setdefault(uid, set())
-    selected.remove(tag) if tag in selected else selected.add(tag)
-    await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
-    await call.answer()
-
-
-@dp.callback_query_handler(lambda c: c.data == "bc_level_all")
-async def bc_level_all(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_level":
-        await call.answer("Неактуально")
-        return
-    selected = BC_SELECTED_LEVELS.setdefault(uid, set())
-    if selected == ALL_LEVEL_TAGS:
-        selected.clear()
-    else:
-        selected.clear()
-        selected.update(ALL_LEVEL_TAGS)
-    await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
-    await call.answer("Ок")
-
-
-@dp.callback_query_handler(lambda c: c.data == "bc_level_back")
-async def bc_level_back(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_level":
-        await call.answer("Неактуально")
-        return
-    STATE[uid] = "bc_age"
-    await call.message.edit_text("🏷 Выбери возраст:", reply_markup=kb_bc_age(uid))
-    await call.answer()
-
-
-@dp.callback_query_handler(lambda c: c.data == "bc_level_next")
-async def bc_level_next(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if STATE.get(uid) != "bc_level":
-        await call.answer("Неактуально")
-        return
-
-    branch = BC_SELECTED_BRANCH.get(uid)
-    if not branch:
-        await call.answer("Сначала выбери филиал", show_alert=True)
-        return
-
-    ages = BC_SELECTED_AGES.get(uid, set())
-    levels = BC_SELECTED_LEVELS.get(uid, set())
-    if not levels:
-        await call.answer("Выбери минимум 1 уровень", show_alert=True)
-        return
-
-    targets = db_get_chats_by_filter(branch, ages, levels)
-    if not targets:
-        await call.answer("Нет чатов под фильтр. Разметь группы.", show_alert=True)
-        return
-
-    BC_TARGET_CHATS[uid] = set(targets)
-    STATE[uid] = "bc_confirm"
-
-    lines = []
-    for cid in targets:
-        ch = db_get_chat(int(cid))
-        title = ch["title"] if ch and ch.get("title") else str(cid)
-        lines.append(f"• {title}")
-
-    shown = lines[:30]
-    extra = len(lines) - len(shown)
-    list_text = "\n".join(shown)
-    if extra > 0:
-        list_text += f"\n… и ещё {extra} чатов"
-
-    await call.message.edit_text(
-        f"✅ Чатов подходит: {len(targets)}\n\n"
         f"📋 Чаты:\n{list_text}\n\n"
         "Нажми ✅ чтобы подтвердить рассылку.",
         reply_markup=kb_bc_confirm()

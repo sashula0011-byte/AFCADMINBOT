@@ -378,8 +378,26 @@ async def noop(call: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == "menu_broadcast")
 async def menu_broadcast(call: types.CallbackQuery):
-    if not is_owner_user_id(call.from_user.id):
-        await call.answer("⛔", show_alert=True)
+    uid = call.from_user.id
+    if not is_owner_user_id(uid):
+        await call.answer("⛔ Только владелец", show_alert=True)
+        return
+
+    # запускаем broadcast без fake Message
+    STATE[uid] = "bc_choose_branch"
+    BC_SELECTED_BRANCH.pop(uid, None)
+    BC_SELECTED_AGES.pop(uid, None)
+    BC_SELECTED_LEVELS.pop(uid, None)
+    BC_TARGET_CHATS.pop(uid, None)
+    BC_MANUAL_SELECTED.pop(uid, None)
+    BC_MANUAL_PAGE.pop(uid, None)
+
+    await call.message.answer(
+        "📣 Выбери филиал для рассылки:",
+        reply_markup=kb_branch_picker("bc_branch", "bc_cancel")
+    )
+    await call.answer()
+
         return
     fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
     await cmd_broadcast(fake)
@@ -389,8 +407,25 @@ async def menu_broadcast(call: types.CallbackQuery):
 async def menu_branch_next_missing(call: types.CallbackQuery):
     uid = call.from_user.id
     if not is_owner_user_id(uid):
-        await call.answer("⛔", show_alert=True)
+        await call.answer("⛔ Только владелец", show_alert=True)
         return
+
+    next_chat = db_get_next_missing_branch_chat()
+    if not next_chat:
+        await call.message.answer("✅ Все группы уже имеют филиал!")
+        await call.answer()
+        return
+
+    BR_AUTO_NEXT[uid] = True
+    BR_TARGET_CHAT[uid] = int(next_chat["chat_id"])
+    BR_STATE[uid] = "br_choose_branch"
+
+    await call.message.answer(
+        f"⚡ Назначаем филиал\nЧат: {next_chat['title']}\n\nВыбери филиал:",
+        reply_markup=kb_branch_picker("br_branch", "br_cancel")
+    )
+    await call.answer()
+
 
     next_chat = db_get_next_missing_branch_chat()
     if not next_chat:

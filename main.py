@@ -581,7 +581,9 @@ async def bc_mode_tags(call: types.CallbackQuery):
 # Manual pick (FIXED)
 # ==========================
 
-@dp.callback_query_handler(lambda c: c.data.startswith("bc_mpick_") and c.data.split("_")[-1].isdigit())
+@dp.callback_query_handler(
+    lambda c: c.data.startswith("bc_mpick_") and c.data.split("_")[-1].lstrip("-").isdigit()
+)
 async def bc_mpick_toggle(call: types.CallbackQuery):
     uid = call.from_user.id
     if STATE.get(uid) != "bc_manual_pick":
@@ -598,7 +600,6 @@ async def bc_mpick_toggle(call: types.CallbackQuery):
 
     await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
     await call.answer()
-
 
 @dp.callback_query_handler(lambda c: c.data == "bc_mpage_prev")
 async def bc_mpage_prev(call: types.CallbackQuery):

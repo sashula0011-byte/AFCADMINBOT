@@ -66,21 +66,31 @@ ALL_LEVEL_TAGS = {t for t, _ in LEVEL_TAGS}
 def db_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor, sslmode="require")
 
+
 def db_init():
+    """
+    Создание таблицы + авто-миграция.
+    Нужна чтобы при обновлениях кода бот не ломался если таблица уже была создана без новых колонок.
+    """
     with db_conn() as conn:
         with conn.cursor() as cur:
+            # 1) базовая таблица
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chats (
                     chat_id BIGINT PRIMARY KEY,
                     title TEXT NOT NULL,
                     chat_type TEXT NOT NULL,
-                    branch TEXT NULL,
-                    age TEXT NULL,
-                    level TEXT NULL,
                     updated_at TIMESTAMP DEFAULT NOW()
                 );
             """)
+
+            # 2) миграции колонок
+            cur.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS branch TEXT;")
+            cur.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS age TEXT;")
+            cur.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS level TEXT;")
+
         conn.commit()
+
 
 def db_upsert_chat(chat: types.Chat):
     if chat.type not in ("group", "supergroup"):
@@ -97,11 +107,13 @@ def db_upsert_chat(chat: types.Chat):
             """, (chat.id, chat.title or str(chat.id), chat.type))
         conn.commit()
 
+
 def db_get_chat(chat_id: int) -> Optional[dict]:
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM chats WHERE chat_id=%s;", (chat_id,))
             return cur.fetchone()
+
 
 def db_get_chats_by_branch(branch: str) -> List[dict]:
     with db_conn() as conn:
@@ -113,11 +125,13 @@ def db_get_chats_by_branch(branch: str) -> List[dict]:
             """, (branch,))
             return cur.fetchall()
 
+
 def db_set_chat_branch(chat_id: int, branch: str):
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE chats SET branch=%s, updated_at=NOW() WHERE chat_id=%s;", (branch, chat_id))
         conn.commit()
+
 
 def db_get_next_missing_branch_chat() -> Optional[dict]:
     with db_conn() as conn:
@@ -129,6 +143,7 @@ def db_get_next_missing_branch_chat() -> Optional[dict]:
                 LIMIT 1;
             """)
             return cur.fetchone()
+
 
 def db_get_chats_by_filter(branch: str, ages: Set[str], levels: Set[str]) -> List[int]:
     if not ages or not levels:
@@ -143,18 +158,6 @@ def db_get_chats_by_filter(branch: str, ages: Set[str], levels: Set[str]) -> Lis
             rows = cur.fetchall()
             return [int(r["chat_id"]) for r in rows]
 
-def db_set_chat_age(chat_id: int, age: str):
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE chats SET age=%s, updated_at=NOW() WHERE chat_id=%s;", (age, chat_id))
-        conn.commit()
-
-def db_set_chat_level(chat_id: int, level: str):
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE chats SET level=%s, updated_at=NOW() WHERE chat_id=%s;", (level, chat_id))
-        conn.commit()
-
 
 # ==========================
 # Helpers
@@ -163,8 +166,10 @@ def db_set_chat_level(chat_id: int, level: str):
 def is_owner_user_id(user_id: int) -> bool:
     return OWNER_ID != 0 and user_id == OWNER_ID
 
+
 def is_owner(message: types.Message) -> bool:
     return message.from_user and is_owner_user_id(message.from_user.id)
+
 
 async def send_to_chat(chat_id: int, origin: types.Message):
     if origin.text:
@@ -184,8 +189,9 @@ async def send_to_chat(chat_id: int, origin: types.Message):
     else:
         await bot.send_message(chat_id, "⚠️ Этот тип сообщения пока не поддерживается.")
 
+
 def chunk_list(items: List[dict], size: int) -> List[List[dict]]:
-    return [items[i:i+size] for i in range(0, len(items), size)]
+    return [items[i:i + size] for i in range(0, len(items), size)]
 
 
 # ==========================
@@ -221,12 +227,14 @@ def kb_main_admin() -> InlineKeyboardMarkup:
     )
     return kb
 
+
 def kb_branch_picker(prefix: str, cancel_cb: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
     for tag, label in BRANCH_TAGS:
         kb.add(InlineKeyboardButton(label, callback_data=f"{prefix}_{tag}"))
     kb.add(InlineKeyboardButton("❌ Отмена", callback_data=cancel_cb))
     return kb
+
 
 def kb_broadcast_mode() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
@@ -237,6 +245,7 @@ def kb_broadcast_mode() -> InlineKeyboardMarkup:
     )
     return kb
 
+
 def kb_bc_confirm() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
@@ -244,6 +253,7 @@ def kb_bc_confirm() -> InlineKeyboardMarkup:
         InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"),
     )
     return kb
+
 
 def kb_bc_age(user_id: int) -> InlineKeyboardMarkup:
     selected = BC_SELECTED_AGES.get(user_id, set())
@@ -262,6 +272,7 @@ def kb_bc_age(user_id: int) -> InlineKeyboardMarkup:
     )
     return kb
 
+
 def kb_bc_level(user_id: int) -> InlineKeyboardMarkup:
     selected = BC_SELECTED_LEVELS.get(user_id, set())
     kb = InlineKeyboardMarkup(row_width=1)
@@ -279,6 +290,7 @@ def kb_bc_level(user_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"),
     )
     return kb
+
 
 def kb_bc_manual_pick(user_id: int) -> InlineKeyboardMarkup:
     branch = BC_SELECTED_BRANCH.get(user_id)
@@ -305,7 +317,7 @@ def kb_bc_manual_pick(user_id: int) -> InlineKeyboardMarkup:
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data="bc_mpage_prev"))
-    nav.append(InlineKeyboardButton(f"📄 {page+1}/{len(pages)}", callback_data="noop"))
+    nav.append(InlineKeyboardButton(f"📄 {page + 1}/{len(pages)}", callback_data="noop"))
     if page < len(pages) - 1:
         nav.append(InlineKeyboardButton("➡️", callback_data="bc_mpage_next"))
     kb.row(*nav)
@@ -328,7 +340,7 @@ async def on_startup(dp: Dispatcher):
     db_init()
     logging.info("✅ Bot started polling")
     logging.info(f"OWNER_ID parsed = {OWNER_ID}")
-    logging.info("✅ Postgres initialized")
+    logging.info("✅ Postgres initialized + migrated")
 
 
 # ==========================
@@ -343,6 +355,7 @@ async def cmd_start(message: types.Message):
         parse_mode="HTML",
         reply_markup=kb_main_admin()
     )
+
 
 @dp.message_handler(commands=["broadcast"])
 async def cmd_broadcast(message: types.Message):
@@ -373,6 +386,7 @@ async def cmd_broadcast(message: types.Message):
 async def noop(call: types.CallbackQuery):
     await call.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data == "menu_broadcast")
 async def menu_broadcast(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -394,17 +408,16 @@ async def menu_broadcast(call: types.CallbackQuery):
     )
     await call.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data == "menu_branch_next_missing")
 async def menu_branch_next_missing(call: types.CallbackQuery):
     uid = call.from_user.id
-
     try:
         if not is_owner_user_id(uid):
             await call.answer("⛔ Только владелец", show_alert=True)
             return
 
         next_chat = db_get_next_missing_branch_chat()
-
         if not next_chat:
             await call.message.answer(
                 "✅ Нет групп без филиала.\n\n"
@@ -448,6 +461,7 @@ async def br_cancel(call: types.CallbackQuery):
     BR_AUTO_NEXT.pop(uid, None)
     await call.message.edit_text("❌ Разметка филиала отменена.")
     await call.answer()
+
 
 @dp.callback_query_handler(lambda c: c.data.startswith("br_branch_"))
 async def br_set_branch(call: types.CallbackQuery):
@@ -506,6 +520,7 @@ async def bc_cancel(call: types.CallbackQuery):
     await call.message.edit_text("❌ Рассылка отменена.")
     await call.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_branch_"))
 async def bc_choose_branch(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -522,6 +537,7 @@ async def bc_choose_branch(call: types.CallbackQuery):
         reply_markup=kb_broadcast_mode()
     )
     await call.answer()
+
 
 @dp.callback_query_handler(lambda c: c.data == "bc_mode_manual")
 async def bc_mode_manual(call: types.CallbackQuery):
@@ -542,6 +558,7 @@ async def bc_mode_manual(call: types.CallbackQuery):
         reply_markup=kb_bc_manual_pick(uid)
     )
     await call.answer()
+
 
 @dp.callback_query_handler(lambda c: c.data == "bc_mode_tags")
 async def bc_mode_tags(call: types.CallbackQuery):
@@ -582,6 +599,7 @@ async def bc_mpick_toggle(call: types.CallbackQuery):
     await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
     await call.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data == "bc_mpage_prev")
 async def bc_mpage_prev(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -589,12 +607,14 @@ async def bc_mpage_prev(call: types.CallbackQuery):
     await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
     await call.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data == "bc_mpage_next")
 async def bc_mpage_next(call: types.CallbackQuery):
     uid = call.from_user.id
     BC_MANUAL_PAGE[uid] = BC_MANUAL_PAGE.get(uid, 0) + 1
     await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
     await call.answer()
+
 
 @dp.callback_query_handler(lambda c: c.data == "bc_mpick_all")
 async def bc_mpick_all(call: types.CallbackQuery):
@@ -616,6 +636,7 @@ async def bc_mpick_all(call: types.CallbackQuery):
 
     await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
     await call.answer("Ок")
+
 
 @dp.callback_query_handler(lambda c: c.data == "bc_mpick_next")
 async def bc_mpick_next(call: types.CallbackQuery):
@@ -669,6 +690,7 @@ async def bc_toggle_age(call: types.CallbackQuery):
     await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
     await call.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data == "bc_age_all")
 async def bc_age_all(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -684,6 +706,7 @@ async def bc_age_all(call: types.CallbackQuery):
     await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
     await call.answer("Ок")
 
+
 @dp.callback_query_handler(lambda c: c.data == "bc_age_next")
 async def bc_age_next(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -698,6 +721,7 @@ async def bc_age_next(call: types.CallbackQuery):
     await call.message.edit_text("🏷 Выбери уровень:", reply_markup=kb_bc_level(uid))
     await call.answer()
 
+
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_level_") and c.data not in ("bc_level_all", "bc_level_back", "bc_level_next"))
 async def bc_toggle_level(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -709,6 +733,7 @@ async def bc_toggle_level(call: types.CallbackQuery):
     selected.remove(tag) if tag in selected else selected.add(tag)
     await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
     await call.answer()
+
 
 @dp.callback_query_handler(lambda c: c.data == "bc_level_all")
 async def bc_level_all(call: types.CallbackQuery):
@@ -725,6 +750,7 @@ async def bc_level_all(call: types.CallbackQuery):
     await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
     await call.answer("Ок")
 
+
 @dp.callback_query_handler(lambda c: c.data == "bc_level_back")
 async def bc_level_back(call: types.CallbackQuery):
     uid = call.from_user.id
@@ -734,6 +760,7 @@ async def bc_level_back(call: types.CallbackQuery):
     STATE[uid] = "bc_age"
     await call.message.edit_text("🏷 Выбери возраст:", reply_markup=kb_bc_age(uid))
     await call.answer()
+
 
 @dp.callback_query_handler(lambda c: c.data == "bc_level_next")
 async def bc_level_next(call: types.CallbackQuery):
@@ -803,7 +830,7 @@ async def bc_confirm_send(call: types.CallbackQuery):
 
 
 # ==========================
-# Any message: save group + send broadcast message
+# Any message
 # ==========================
 
 @dp.message_handler(content_types=types.ContentTypes.ANY)

@@ -12,7 +12,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -33,7 +32,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot)
 
 # ==========================
-# Tags
+# TAGS
 # ==========================
 
 AGE_TAGS = [
@@ -48,6 +47,11 @@ LEVEL_TAGS = [
     ("beginner", "🟢 Начинающие"),
     ("middle", "🟡 Продолжающие"),
     ("pro", "🔴 Профи"),
+]
+
+BRANCH_TAGS = [
+    ("krylatskoe", "📍 Крылатское"),
+    ("odintsovo", "📍 Одинцово"),
 ]
 
 ALL_AGE_TAGS = {t for t, _ in AGE_TAGS}
@@ -69,6 +73,7 @@ def db_init():
                     chat_id BIGINT PRIMARY KEY,
                     title TEXT NOT NULL,
                     chat_type TEXT NOT NULL,
+                    branch TEXT NULL,
                     age TEXT NULL,
                     level TEXT NULL,
                     updated_at TIMESTAMP DEFAULT NOW()
@@ -97,6 +102,16 @@ def db_get_chats() -> List[dict]:
             cur.execute("SELECT * FROM chats ORDER BY title ASC;")
             return cur.fetchall()
 
+def db_get_chats_by_branch(branch: str) -> List[dict]:
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM chats
+                WHERE branch=%s
+                ORDER BY title ASC;
+            """, (branch,))
+            return cur.fetchall()
+
 def db_get_missing_chats() -> List[dict]:
     with db_conn() as conn:
         with conn.cursor() as cur:
@@ -107,12 +122,33 @@ def db_get_missing_chats() -> List[dict]:
             """)
             return cur.fetchall()
 
+def db_get_missing_branch_chats() -> List[dict]:
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM chats
+                WHERE branch IS NULL
+                ORDER BY title ASC;
+            """)
+            return cur.fetchall()
+
 def db_get_next_missing_chat() -> Optional[dict]:
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT * FROM chats
                 WHERE age IS NULL OR level IS NULL
+                ORDER BY title ASC
+                LIMIT 1;
+            """)
+            return cur.fetchone()
+
+def db_get_next_missing_branch_chat() -> Optional[dict]:
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM chats
+                WHERE branch IS NULL
                 ORDER BY title ASC
                 LIMIT 1;
             """)
@@ -136,16 +172,22 @@ def db_set_chat_level(chat_id: int, level: str):
             cur.execute("UPDATE chats SET level=%s, updated_at=NOW() WHERE chat_id=%s;", (level, chat_id))
         conn.commit()
 
-def db_get_chats_by_filter(ages: Set[str], levels: Set[str]) -> List[int]:
+def db_set_chat_branch(chat_id: int, branch: str):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE chats SET branch=%s, updated_at=NOW() WHERE chat_id=%s;", (branch, chat_id))
+        conn.commit()
+
+def db_get_chats_by_filter(branch: str, ages: Set[str], levels: Set[str]) -> List[int]:
     if not ages or not levels:
         return []
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT chat_id FROM chats
-                WHERE age = ANY(%s) AND level = ANY(%s)
+                WHERE branch=%s AND age = ANY(%s) AND level = ANY(%s)
                 ORDER BY title ASC;
-            """, (list(ages), list(levels)))
+            """, (branch, list(ages), list(levels)))
             rows = cur.fetchall()
             return [int(r["chat_id"]) for r in rows]
 
@@ -178,19 +220,36 @@ async def send_to_chat(chat_id: int, origin: types.Message):
     else:
         await bot.send_message(chat_id, "⚠️ Этот тип сообщения пока не поддерживается.")
 
+def chunk_list(items: List[dict], size: int) -> List[List[dict]]:
+    return [items[i:i+size] for i in range(0, len(items), size)]
+
 
 # ==========================
 # STATES
 # ==========================
 
-STATE: Dict[int, str] = {}  # bc_age -> bc_level -> bc_wait_msg
+# Broadcast flow:
+# bc_choose_branch -> bc_choose_mode -> bc_manual_pick OR bc_age -> bc_level -> bc_confirm -> bc_wait_msg
+STATE: Dict[int, str] = {}
+
+BC_SELECTED_BRANCH: Dict[int, str] = {}
 BC_SELECTED_AGES: Dict[int, Set[str]] = {}
 BC_SELECTED_LEVELS: Dict[int, Set[str]] = {}
 BC_TARGET_CHATS: Dict[int, Set[int]] = {}
 
-TAG_STATE: Dict[int, str] = {}  # tag_choose_chat -> tag_choose_age -> tag_choose_level
+# manual selection
+BC_MANUAL_SELECTED: Dict[int, Set[int]] = {}
+BC_MANUAL_PAGE: Dict[int, int] = {}
+
+# Tagging age/level
+TAG_STATE: Dict[int, str] = {}
 TAG_TARGET_CHAT: Dict[int, int] = {}
 TAG_AUTO_NEXT: Dict[int, bool] = {}
+
+# Branch tagging
+BR_STATE: Dict[int, str] = {}        # br_choose_chat -> br_choose_branch
+BR_TARGET_CHAT: Dict[int, int] = {}
+BR_AUTO_NEXT: Dict[int, bool] = {}
 
 
 # ==========================
@@ -201,11 +260,29 @@ def kb_main_admin() -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("📣 Рассылка", callback_data="menu_broadcast"),
-        InlineKeyboardButton("🏷 Разметить чат (/tag)", callback_data="menu_tag"),
-        InlineKeyboardButton("⚡ Разметить следующий непомеченный", callback_data="menu_tag_next_missing"),
+        InlineKeyboardButton("🏢 Разметка филиала", callback_data="menu_branch_tag"),
+        InlineKeyboardButton("⚡ Следующий без филиала", callback_data="menu_branch_next_missing"),
+        InlineKeyboardButton("🏷 Разметить чат (возраст/уровень)", callback_data="menu_tag"),
+        InlineKeyboardButton("⚡ Следующий без тегов", callback_data="menu_tag_next_missing"),
         InlineKeyboardButton("🧩 Список чатов (с тегами)", callback_data="menu_chats"),
         InlineKeyboardButton("📋 Все группы", callback_data="menu_groups"),
         InlineKeyboardButton("⚠️ Не помеченные группы", callback_data="menu_groups_missing"),
+    )
+    return kb
+
+def kb_branch_picker(prefix: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    for tag, label in BRANCH_TAGS:
+        kb.add(InlineKeyboardButton(label, callback_data=f"{prefix}_{tag}"))
+    kb.add(InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"))
+    return kb
+
+def kb_broadcast_mode() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("🔎 Выбрать чаты по названию", callback_data="bc_mode_manual"),
+        InlineKeyboardButton("🏷 Выбрать чаты по тегу", callback_data="bc_mode_tags"),
+        InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"),
     )
     return kb
 
@@ -221,6 +298,14 @@ def kb_tag_level_picker() -> InlineKeyboardMarkup:
     for tag, label in LEVEL_TAGS:
         kb.add(InlineKeyboardButton(label, callback_data=f"tag_level_{tag}"))
     kb.add(InlineKeyboardButton("❌ Отмена", callback_data="tag_cancel"))
+    return kb
+
+def kb_bc_confirm() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton("✅ Отправить рассылку", callback_data="bc_confirm_send"),
+        InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"),
+    )
     return kb
 
 def kb_bc_age(user_id: int) -> InlineKeyboardMarkup:
@@ -258,6 +343,60 @@ def kb_bc_level(user_id: int) -> InlineKeyboardMarkup:
     )
     return kb
 
+def kb_bc_manual_pick(user_id: int) -> InlineKeyboardMarkup:
+    branch = BC_SELECTED_BRANCH.get(user_id)
+    chats = db_get_chats_by_branch(branch) if branch else []
+    selected = BC_MANUAL_SELECTED.get(user_id, set())
+    page = BC_MANUAL_PAGE.get(user_id, 0)
+
+    per_page = 15
+    pages = chunk_list(chats, per_page)
+    if not pages:
+        pages = [[]]
+    page = max(0, min(page, len(pages) - 1))
+    BC_MANUAL_PAGE[user_id] = page
+
+    kb = InlineKeyboardMarkup(row_width=1)
+
+    for ch in pages[page]:
+        cid = int(ch["chat_id"])
+        title = ch["title"]
+        mark = "✅" if cid in selected else "⬜"
+        kb.add(InlineKeyboardButton(f"{mark} {title}", callback_data=f"bc_mpick_{cid}"))
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data="bc_mpage_prev"))
+    nav.append(InlineKeyboardButton(f"📄 {page+1}/{len(pages)}", callback_data="noop"))
+    if page < len(pages) - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data="bc_mpage_next"))
+    if nav:
+        kb.row(*nav)
+
+    all_mark = "✅" if len(selected) == len(chats) and len(chats) > 0 else "⬜"
+    kb.add(
+        InlineKeyboardButton(f"{all_mark} ✅ Выбрать все", callback_data="bc_mpick_all"),
+        InlineKeyboardButton("➡️ Далее", callback_data="bc_mpick_next"),
+        InlineKeyboardButton("❌ Отмена", callback_data="bc_cancel"),
+    )
+    return kb
+
+def kb_branch_tag_pick_chat() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    chats = db_get_chats()
+    for ch in chats[:60]:
+        branch = ch.get("branch") or "-"
+        kb.add(InlineKeyboardButton(f"{ch['title']}  (branch={branch})", callback_data=f"br_chat_{ch['chat_id']}"))
+    kb.add(InlineKeyboardButton("❌ Отмена", callback_data="br_cancel"))
+    return kb
+
+def kb_branch_tag_branch() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
+    for tag, label in BRANCH_TAGS:
+        kb.add(InlineKeyboardButton(label, callback_data=f"br_branch_{tag}"))
+    kb.add(InlineKeyboardButton("❌ Отмена", callback_data="br_cancel"))
+    return kb
+
 
 # ==========================
 # Startup
@@ -282,28 +421,46 @@ async def cmd_start(message: types.Message):
         f"Ваш ID: <code>{message.from_user.id}</code>\n\n"
         "Команды:\n"
         "/broadcast — рассылка\n"
-        "/tag — разметка\n"
-        "/chats — список чатов (с тегами)\n"
         "/groups — все группы\n"
         "/groups_missing — не помеченные\n",
         parse_mode="HTML",
         reply_markup=kb_main_admin()
     )
 
+@dp.message_handler(commands=["broadcast"])
+async def cmd_broadcast(message: types.Message):
+    if not is_owner(message):
+        await message.reply("⛔ Только владелец может делать рассылку.")
+        return
+
+    uid = message.from_user.id
+
+    # reset all broadcast state
+    STATE[uid] = "bc_choose_branch"
+    BC_SELECTED_BRANCH.pop(uid, None)
+    BC_SELECTED_AGES.pop(uid, None)
+    BC_SELECTED_LEVELS.pop(uid, None)
+    BC_TARGET_CHATS.pop(uid, None)
+    BC_MANUAL_SELECTED.pop(uid, None)
+    BC_MANUAL_PAGE.pop(uid, None)
+
+    await message.reply(
+        "📣 Выбери филиал для рассылки:",
+        reply_markup=kb_branch_picker("bc_branch")
+    )
+
 @dp.message_handler(commands=["groups"])
 async def cmd_groups(message: types.Message):
     if not is_owner(message):
-        await message.reply("⛔ Только владелец может смотреть список групп.")
+        await message.reply("⛔ Только владелец может смотреть список.")
         return
-
     chats = db_get_chats()
     if not chats:
-        await message.reply("Групп пока нет. Добавь бота в группы.")
+        await message.reply("Чатов нет.")
         return
-
     lines = ["📋 Все группы:"]
     for ch in chats:
-        lines.append(f"- {ch['title']} ({ch['chat_id']})")
+        lines.append(f"- {ch['title']} | branch={ch.get('branch') or '-'}")
     await message.reply("\n".join(lines))
 
 @dp.message_handler(commands=["groups_missing"])
@@ -311,81 +468,14 @@ async def cmd_groups_missing(message: types.Message):
     if not is_owner(message):
         await message.reply("⛔ Только владелец может смотреть список.")
         return
-
     missing = db_get_missing_chats()
     if not missing:
         await message.reply("✅ Все группы размечены.")
         return
-
     lines = ["⚠️ Не помеченные группы:"]
     for ch in missing:
-        age = ch.get("age") or "-"
-        level = ch.get("level") or "-"
-        lines.append(f"- {ch['title']} | age={age} | level={level}")
+        lines.append(f"- {ch['title']} | branch={ch.get('branch') or '-'} | age={ch.get('age') or '-'} | level={ch.get('level') or '-'}")
     await message.reply("\n".join(lines))
-
-@dp.message_handler(commands=["chats"])
-async def cmd_chats(message: types.Message):
-    if not is_owner(message):
-        await message.reply("⛔ Только владелец может смотреть список.")
-        return
-
-    chats = db_get_chats()
-    if not chats:
-        await message.reply("Чатов пока нет. Добавь бота в группы.")
-        return
-
-    lines = ["🧩 Чаты (с тегами):"]
-    for ch in chats:
-        age = ch.get("age") or "-"
-        level = ch.get("level") or "-"
-        lines.append(f"- {ch['title']} | age={age} | level={level}")
-    await message.reply("\n".join(lines))
-
-@dp.message_handler(commands=["tag"])
-async def cmd_tag(message: types.Message):
-    if not is_owner(message):
-        await message.reply("⛔ Эта команда только для владельца.")
-        return
-
-    chats = db_get_chats()
-    if not chats:
-        await message.reply("⚠️ Чатов нет. Добавь бота в группы.")
-        return
-
-    TAG_AUTO_NEXT[message.from_user.id] = False
-    TAG_STATE[message.from_user.id] = "tag_choose_chat"
-
-    kb = InlineKeyboardMarkup(row_width=1)
-    for ch in chats[:50]:
-        tags = []
-        if ch.get("age"):
-            tags.append(ch["age"])
-        if ch.get("level"):
-            tags.append(ch["level"])
-        suffix = f" ({', '.join(tags)})" if tags else ""
-        kb.add(InlineKeyboardButton(f"{ch['title']}{suffix}", callback_data=f"tag_chat_{ch['chat_id']}"))
-    kb.add(InlineKeyboardButton("❌ Отмена", callback_data="tag_cancel"))
-
-    await message.reply("🏷 Выбери чат для разметки:", reply_markup=kb)
-
-@dp.message_handler(commands=["broadcast"])
-async def cmd_broadcast(message: types.Message):
-    if not is_owner(message):
-        await message.reply(
-            "⛔ Эта команда только для владельца.\n\n"
-            f"Ваш id: {message.from_user.id}\n"
-            f"OWNER_ID в Railway сейчас: {OWNER_ID}"
-        )
-        return
-
-    uid = message.from_user.id
-    STATE[uid] = "bc_age"
-    BC_SELECTED_AGES[uid] = set()
-    BC_SELECTED_LEVELS[uid] = set()
-    BC_TARGET_CHATS.pop(uid, None)
-
-    await message.reply("📣 Выбери возраст:", reply_markup=kb_bc_age(uid))
 
 
 # ==========================
@@ -402,67 +492,293 @@ async def menu_broadcast(call: types.CallbackQuery):
     await cmd_broadcast(fake)
     await call.answer()
 
-@dp.callback_query_handler(lambda c: c.data == "menu_tag")
-async def menu_tag(call: types.CallbackQuery):
-    fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
-    await cmd_tag(fake)
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "menu_groups")
-async def menu_groups(call: types.CallbackQuery):
-    fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
-    await cmd_groups(fake)
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "menu_groups_missing")
-async def menu_groups_missing(call: types.CallbackQuery):
-    fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
-    await cmd_groups_missing(fake)
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "menu_chats")
-async def menu_chats(call: types.CallbackQuery):
-    fake = types.Message(message_id=0, date=None, chat=call.message.chat, from_user=call.from_user)
-    await cmd_chats(fake)
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data == "menu_tag_next_missing")
-async def menu_tag_next_missing(call: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: c.data == "menu_branch_tag")
+async def menu_branch_tag(call: types.CallbackQuery):
     uid = call.from_user.id
     if not is_owner_user_id(uid):
-        await call.answer("⛔ Только владелец", show_alert=True)
+        await call.answer("⛔", show_alert=True)
         return
 
-    next_chat = db_get_next_missing_chat()
+    BR_AUTO_NEXT[uid] = False
+    BR_STATE[uid] = "br_choose_chat"
+
+    await call.message.answer("🏢 Выбери чат чтобы назначить филиал:", reply_markup=kb_branch_tag_pick_chat())
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "menu_branch_next_missing")
+async def menu_branch_next_missing(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if not is_owner_user_id(uid):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    next_chat = db_get_next_missing_branch_chat()
     if not next_chat:
-        await call.message.answer("✅ Все группы размечены!")
+        await call.message.answer("✅ Все группы уже имеют филиал!")
         await call.answer()
         return
 
-    TAG_AUTO_NEXT[uid] = True
-    TAG_TARGET_CHAT[uid] = int(next_chat["chat_id"])
-    TAG_STATE[uid] = "tag_choose_age"
+    BR_AUTO_NEXT[uid] = True
+    BR_TARGET_CHAT[uid] = int(next_chat["chat_id"])
+    BR_STATE[uid] = "br_choose_branch"
 
     await call.message.answer(
-        f"⚡ Быстрая разметка\n"
-        f"Чат: {next_chat['title']}\n\n"
-        f"Выбери возраст:",
-        reply_markup=kb_tag_age_picker()
+        f"⚡ Назначаем филиал\nЧат: {next_chat['title']}\n\nВыбери филиал:",
+        reply_markup=kb_branch_tag_branch()
     )
     await call.answer()
 
 
 # ==========================
-# Broadcast callbacks
+# Branch tagging flow
+# ==========================
+
+@dp.callback_query_handler(lambda c: c.data == "br_cancel")
+async def br_cancel(call: types.CallbackQuery):
+    uid = call.from_user.id
+    BR_STATE.pop(uid, None)
+    BR_TARGET_CHAT.pop(uid, None)
+    BR_AUTO_NEXT.pop(uid, None)
+    await call.message.edit_text("❌ Разметка филиала отменена.")
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("br_chat_"))
+async def br_choose_chat(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if BR_STATE.get(uid) != "br_choose_chat":
+        await call.answer("Неактуально")
+        return
+
+    chat_id = int(call.data.split("_")[-1])
+    BR_TARGET_CHAT[uid] = chat_id
+    BR_STATE[uid] = "br_choose_branch"
+
+    ch = db_get_chat(chat_id)
+    title = ch["title"] if ch else str(chat_id)
+
+    await call.message.edit_text(
+        f"Чат: {title}\n\nВыбери филиал:",
+        reply_markup=kb_branch_tag_branch()
+    )
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("br_branch_"))
+async def br_set_branch(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if BR_STATE.get(uid) != "br_choose_branch":
+        await call.answer("Неактуально")
+        return
+
+    chat_id = BR_TARGET_CHAT.get(uid)
+    if not chat_id:
+        await call.answer("Ошибка: чат не выбран")
+        return
+
+    branch = call.data.split("_")[-1]
+    db_set_chat_branch(chat_id, branch)
+
+    ch = db_get_chat(chat_id)
+    title = ch["title"] if ch else str(chat_id)
+
+    BR_STATE.pop(uid, None)
+    BR_TARGET_CHAT.pop(uid, None)
+
+    await call.message.edit_text(f"✅ Филиал назначен!\n\n{title}\nbranch={branch}")
+    await call.answer()
+
+    if BR_AUTO_NEXT.get(uid):
+        next_chat = db_get_next_missing_branch_chat()
+        if not next_chat:
+            await call.message.answer("✅ Все группы теперь имеют филиал!")
+            BR_AUTO_NEXT.pop(uid, None)
+            return
+
+        BR_TARGET_CHAT[uid] = int(next_chat["chat_id"])
+        BR_STATE[uid] = "br_choose_branch"
+
+        await call.message.answer(
+            f"⚡ Следующий чат:\n{next_chat['title']}\n\nВыбери филиал:",
+            reply_markup=kb_branch_tag_branch()
+        )
+
+
+# ==========================
+# Broadcast flow: choose branch
+# ==========================
+
+@dp.callback_query_handler(lambda c: c.data.startswith("bc_branch_"))
+async def bc_choose_branch(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_choose_branch":
+        await call.answer("Неактуально")
+        return
+
+    branch = call.data.split("_")[-1]
+    BC_SELECTED_BRANCH[uid] = branch
+    STATE[uid] = "bc_choose_mode"
+
+    await call.message.edit_text(
+        f"✅ Филиал выбран: {branch}\n\nТеперь выбери как выбирать чаты:",
+        reply_markup=kb_broadcast_mode()
+    )
+    await call.answer()
+
+
+# ==========================
+# Broadcast - choose mode
+# ==========================
+
+@dp.callback_query_handler(lambda c: c.data == "bc_mode_manual")
+async def bc_mode_manual(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if not is_owner_user_id(uid):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    branch = BC_SELECTED_BRANCH.get(uid)
+    if not branch:
+        await call.answer("Сначала выбери филиал", show_alert=True)
+        return
+
+    STATE[uid] = "bc_manual_pick"
+    BC_MANUAL_SELECTED[uid] = set()
+    BC_MANUAL_PAGE[uid] = 0
+
+    await call.message.edit_text(
+        "🔎 Выбор чатов вручную.\n\nОтмечай нужные чаты ✅",
+        reply_markup=kb_bc_manual_pick(uid)
+    )
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_mode_tags")
+async def bc_mode_tags(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if not is_owner_user_id(uid):
+        await call.answer("⛔", show_alert=True)
+        return
+
+    branch = BC_SELECTED_BRANCH.get(uid)
+    if not branch:
+        await call.answer("Сначала выбери филиал", show_alert=True)
+        return
+
+    STATE[uid] = "bc_age"
+    BC_SELECTED_AGES[uid] = set()
+    BC_SELECTED_LEVELS[uid] = set()
+    BC_TARGET_CHATS.pop(uid, None)
+
+    await call.message.edit_text("🏷 Выбери возраст:", reply_markup=kb_bc_age(uid))
+    await call.answer()
+
+
+# ==========================
+# Broadcast MANUAL pick
+# ==========================
+
+@dp.callback_query_handler(lambda c: c.data.startswith("bc_mpick_"))
+async def bc_mpick_toggle(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_manual_pick":
+        await call.answer("Неактуально")
+        return
+
+    chat_id = int(call.data.split("_")[-1])
+    selected = BC_MANUAL_SELECTED.setdefault(uid, set())
+    if chat_id in selected:
+        selected.remove(chat_id)
+    else:
+        selected.add(chat_id)
+
+    await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_mpick_all")
+async def bc_mpick_all(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_manual_pick":
+        await call.answer("Неактуально")
+        return
+
+    branch = BC_SELECTED_BRANCH.get(uid)
+    chats = db_get_chats_by_branch(branch) if branch else []
+    all_ids = {int(ch["chat_id"]) for ch in chats}
+
+    selected = BC_MANUAL_SELECTED.setdefault(uid, set())
+    if selected == all_ids:
+        selected.clear()
+    else:
+        selected.clear()
+        selected.update(all_ids)
+
+    await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
+    await call.answer("Ок")
+
+@dp.callback_query_handler(lambda c: c.data == "bc_mpage_prev")
+async def bc_mpage_prev(call: types.CallbackQuery):
+    uid = call.from_user.id
+    BC_MANUAL_PAGE[uid] = max(0, BC_MANUAL_PAGE.get(uid, 0) - 1)
+    await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_mpage_next")
+async def bc_mpage_next(call: types.CallbackQuery):
+    uid = call.from_user.id
+    BC_MANUAL_PAGE[uid] = BC_MANUAL_PAGE.get(uid, 0) + 1
+    await call.message.edit_reply_markup(reply_markup=kb_bc_manual_pick(uid))
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_mpick_next")
+async def bc_mpick_next(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_manual_pick":
+        await call.answer("Неактуально")
+        return
+
+    selected = BC_MANUAL_SELECTED.get(uid, set())
+    if not selected:
+        await call.answer("Выбери хотя бы 1 чат", show_alert=True)
+        return
+
+    BC_TARGET_CHATS[uid] = set(selected)
+    STATE[uid] = "bc_confirm"
+
+    lines = []
+    for cid in selected:
+        ch = db_get_chat(int(cid))
+        title = ch["title"] if ch and ch.get("title") else str(cid)
+        lines.append(f"• {title}")
+
+    shown = lines[:30]
+    extra = len(lines) - len(shown)
+    list_text = "\n".join(shown)
+    if extra > 0:
+        list_text += f"\n… и ещё {extra} чатов"
+
+    await call.message.edit_text(
+        f"✅ Выбрано чатов: {len(selected)}\n\n"
+        f"📋 Чаты:\n{list_text}\n\n"
+        "Нажми ✅ чтобы подтвердить рассылку.",
+        reply_markup=kb_bc_confirm()
+    )
+    await call.answer()
+
+
+# ==========================
+# Broadcast TAG flow
 # ==========================
 
 @dp.callback_query_handler(lambda c: c.data == "bc_cancel")
 async def bc_cancel(call: types.CallbackQuery):
     uid = call.from_user.id
+
     STATE.pop(uid, None)
+    BC_SELECTED_BRANCH.pop(uid, None)
     BC_SELECTED_AGES.pop(uid, None)
     BC_SELECTED_LEVELS.pop(uid, None)
     BC_TARGET_CHATS.pop(uid, None)
+    BC_MANUAL_SELECTED.pop(uid, None)
+    BC_MANUAL_PAGE.pop(uid, None)
+
     await call.message.edit_text("❌ Рассылка отменена.")
     await call.answer()
 
@@ -472,12 +788,14 @@ async def bc_toggle_age(call: types.CallbackQuery):
     if STATE.get(uid) != "bc_age":
         await call.answer("Неактуально")
         return
+
     tag = call.data.split("_")[-1]
     selected = BC_SELECTED_AGES.setdefault(uid, set())
     if tag in selected:
         selected.remove(tag)
     else:
         selected.add(tag)
+
     await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
     await call.answer()
 
@@ -487,12 +805,14 @@ async def bc_age_all(call: types.CallbackQuery):
     if STATE.get(uid) != "bc_age":
         await call.answer("Неактуально")
         return
+
     selected = BC_SELECTED_AGES.setdefault(uid, set())
     if selected == ALL_AGE_TAGS:
         selected.clear()
     else:
         selected.clear()
         selected.update(ALL_AGE_TAGS)
+
     await call.message.edit_reply_markup(reply_markup=kb_bc_age(uid))
     await call.answer("Ок")
 
@@ -502,12 +822,14 @@ async def bc_age_next(call: types.CallbackQuery):
     if STATE.get(uid) != "bc_age":
         await call.answer("Неактуально")
         return
+
     ages = BC_SELECTED_AGES.get(uid, set())
     if not ages:
         await call.answer("Выбери минимум 1 возраст", show_alert=True)
         return
+
     STATE[uid] = "bc_level"
-    await call.message.edit_text("📣 Выбери уровень:", reply_markup=kb_bc_level(uid))
+    await call.message.edit_text("🏷 Выбери уровень:", reply_markup=kb_bc_level(uid))
     await call.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith("bc_level_") and c.data not in ("bc_level_all", "bc_level_back", "bc_level_next"))
@@ -516,12 +838,14 @@ async def bc_toggle_level(call: types.CallbackQuery):
     if STATE.get(uid) != "bc_level":
         await call.answer("Неактуально")
         return
+
     tag = call.data.split("_")[-1]
     selected = BC_SELECTED_LEVELS.setdefault(uid, set())
     if tag in selected:
         selected.remove(tag)
     else:
         selected.add(tag)
+
     await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
     await call.answer()
 
@@ -531,12 +855,14 @@ async def bc_level_all(call: types.CallbackQuery):
     if STATE.get(uid) != "bc_level":
         await call.answer("Неактуально")
         return
+
     selected = BC_SELECTED_LEVELS.setdefault(uid, set())
     if selected == ALL_LEVEL_TAGS:
         selected.clear()
     else:
         selected.clear()
         selected.update(ALL_LEVEL_TAGS)
+
     await call.message.edit_reply_markup(reply_markup=kb_bc_level(uid))
     await call.answer("Ок")
 
@@ -546,8 +872,9 @@ async def bc_level_back(call: types.CallbackQuery):
     if STATE.get(uid) != "bc_level":
         await call.answer("Неактуально")
         return
+
     STATE[uid] = "bc_age"
-    await call.message.edit_text("📣 Выбери возраст:", reply_markup=kb_bc_age(uid))
+    await call.message.edit_text("🏷 Выбери возраст:", reply_markup=kb_bc_age(uid))
     await call.answer()
 
 @dp.callback_query_handler(lambda c: c.data == "bc_level_next")
@@ -557,38 +884,55 @@ async def bc_level_next(call: types.CallbackQuery):
         await call.answer("Неактуально")
         return
 
+    branch = BC_SELECTED_BRANCH.get(uid)
+    if not branch:
+        await call.answer("Сначала выбери филиал", show_alert=True)
+        return
+
     ages = BC_SELECTED_AGES.get(uid, set())
     levels = BC_SELECTED_LEVELS.get(uid, set())
-
     if not levels:
         await call.answer("Выбери минимум 1 уровень", show_alert=True)
         return
 
-    targets = db_get_chats_by_filter(ages, levels)
+    targets = db_get_chats_by_filter(branch, ages, levels)
     if not targets:
-        await call.answer("Нет чатов под фильтр. Разметь /tag", show_alert=True)
+        await call.answer("Нет чатов под фильтр. Разметь группы.", show_alert=True)
         return
 
     BC_TARGET_CHATS[uid] = set(targets)
-    STATE[uid] = "bc_wait_msg"
+    STATE[uid] = "bc_confirm"
 
-    chat_lines = []
+    lines = []
     for cid in targets:
         ch = db_get_chat(int(cid))
         title = ch["title"] if ch and ch.get("title") else str(cid)
-        chat_lines.append(f"• {title}")
+        lines.append(f"• {title}")
 
-    MAX_SHOW = 30
-    shown = chat_lines[:MAX_SHOW]
-    extra = len(chat_lines) - len(shown)
-
+    shown = lines[:30]
+    extra = len(lines) - len(shown)
     list_text = "\n".join(shown)
     if extra > 0:
         list_text += f"\n… и ещё {extra} чатов"
 
     await call.message.edit_text(
-        f"✅ Под фильтр подходит чатов: {len(targets)}\n\n"
-        f"📋 Выбраны чаты:\n{list_text}\n\n"
+        f"✅ Чатов подходит: {len(targets)}\n\n"
+        f"📋 Чаты:\n{list_text}\n\n"
+        "Нажми ✅ чтобы подтвердить рассылку.",
+        reply_markup=kb_bc_confirm()
+    )
+    await call.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "bc_confirm_send")
+async def bc_confirm_send(call: types.CallbackQuery):
+    uid = call.from_user.id
+    if STATE.get(uid) != "bc_confirm":
+        await call.answer("Неактуально")
+        return
+
+    STATE[uid] = "bc_wait_msg"
+    await call.message.edit_text(
+        "✅ Подтверждено!\n\n"
         "Теперь пришли ОДНО сообщение для рассылки:\n"
         "💬 текст / 🖼 фото / 🎬 видео / 📎 файл"
     )
@@ -596,98 +940,7 @@ async def bc_level_next(call: types.CallbackQuery):
 
 
 # ==========================
-# TAG callbacks
-# ==========================
-
-@dp.callback_query_handler(lambda c: c.data == "tag_cancel")
-async def tag_cancel(call: types.CallbackQuery):
-    uid = call.from_user.id
-    TAG_STATE.pop(uid, None)
-    TAG_TARGET_CHAT.pop(uid, None)
-    TAG_AUTO_NEXT.pop(uid, None)
-    await call.message.edit_text("❌ Разметка отменена.")
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data.startswith("tag_chat_"))
-async def tag_choose_chat(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if TAG_STATE.get(uid) != "tag_choose_chat":
-        await call.answer("Неактуально")
-        return
-    chat_id = int(call.data.split("_")[-1])
-    TAG_TARGET_CHAT[uid] = chat_id
-    TAG_STATE[uid] = "tag_choose_age"
-    ch = db_get_chat(chat_id)
-    title = ch["title"] if ch else str(chat_id)
-    await call.message.edit_text(
-        f"Чат: {title}\n\nВыбери возраст:",
-        reply_markup=kb_tag_age_picker()
-    )
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data.startswith("tag_age_"))
-async def tag_set_age(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if TAG_STATE.get(uid) != "tag_choose_age":
-        await call.answer("Неактуально")
-        return
-    chat_id = TAG_TARGET_CHAT.get(uid)
-    if not chat_id:
-        await call.answer("Ошибка: чат не выбран")
-        return
-    age_tag = call.data.split("_")[-1]
-    db_set_chat_age(chat_id, age_tag)
-    TAG_STATE[uid] = "tag_choose_level"
-    await call.message.edit_text(
-        f"✅ Возраст сохранён: {age_tag}\n\nТеперь выбери уровень:",
-        reply_markup=kb_tag_level_picker()
-    )
-    await call.answer()
-
-@dp.callback_query_handler(lambda c: c.data.startswith("tag_level_"))
-async def tag_set_level(call: types.CallbackQuery):
-    uid = call.from_user.id
-    if TAG_STATE.get(uid) != "tag_choose_level":
-        await call.answer("Неактуально")
-        return
-    chat_id = TAG_TARGET_CHAT.get(uid)
-    if not chat_id:
-        await call.answer("Ошибка: чат не выбран")
-        return
-    level_tag = call.data.split("_")[-1]
-    db_set_chat_level(chat_id, level_tag)
-
-    ch = db_get_chat(chat_id)
-
-    TAG_STATE.pop(uid, None)
-    TAG_TARGET_CHAT.pop(uid, None)
-
-    await call.message.edit_text(
-        f"✅ Разметка сохранена!\n\n"
-        f"age={ch.get('age')}\n"
-        f"level={ch.get('level')}"
-    )
-    await call.answer()
-
-    # авто следующий
-    if TAG_AUTO_NEXT.get(uid):
-        next_chat = db_get_next_missing_chat()
-        if not next_chat:
-            await call.message.answer("✅ Все группы размечены!")
-            TAG_AUTO_NEXT.pop(uid, None)
-            return
-
-        TAG_TARGET_CHAT[uid] = int(next_chat["chat_id"])
-        TAG_STATE[uid] = "tag_choose_age"
-
-        await call.message.answer(
-            f"⚡ Следующий чат:\n{next_chat['title']}\n\nВыбери возраст:",
-            reply_markup=kb_tag_age_picker()
-        )
-
-
-# ==========================
-# Any message: save chat + broadcast
+# Any message
 # ==========================
 
 @dp.message_handler(content_types=types.ContentTypes.ANY)
@@ -704,10 +957,14 @@ async def any_message(message: types.Message):
 
     chat_ids = list(BC_TARGET_CHATS.get(uid, set()))
 
+    # clear
     STATE.pop(uid, None)
+    BC_SELECTED_BRANCH.pop(uid, None)
     BC_SELECTED_AGES.pop(uid, None)
     BC_SELECTED_LEVELS.pop(uid, None)
     BC_TARGET_CHATS.pop(uid, None)
+    BC_MANUAL_SELECTED.pop(uid, None)
+    BC_MANUAL_PAGE.pop(uid, None)
 
     await message.reply(f"🚀 Начинаю рассылку в {len(chat_ids)} чатов...")
 
